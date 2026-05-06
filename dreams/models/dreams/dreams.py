@@ -56,6 +56,8 @@ class DreaMS(pl.LightningModule):
         self.cos_reg_alpha = args.cos_reg_alpha
         self.cos_reg_reduction = args.cos_reg_reduction
         self.mask_val = args.mask_val
+        self.enable_cond_tokens = getattr(args, 'enable_cond_tokens', False)
+        self.adduct_vocab_size = getattr(args, 'adduct_vocab_size', 0)
         if self.graphormer_mz_diffs and self.graphormer_parametrized:
             args.d_graphormer_params = args.d_fourier if self.d_fourier else 1
         else:
@@ -88,6 +90,22 @@ class DreaMS(pl.LightningModule):
         # (batch_size, peaks_n, token_dim) -> (batch_size, peaks_n, d_peak)
         self.ff_peak = FeedForward(in_dim=token_dim, hidden_dim=args.d_peak, out_dim=args.d_peak, depth=args.ff_peak_depth,
                                    dropout=args.dropout, bias=not args.no_ffs_bias)
+
+        # Condition tokens: adduct embedding and CE MLP (independent token strategy)
+        if self.enable_cond_tokens:
+            assert self.adduct_vocab_size > 0, 'adduct_vocab_size must be > 0 when enable_cond_tokens=True'
+            self.adduct_embedding = nn.Embedding(
+                num_embeddings=self.adduct_vocab_size,
+                embedding_dim=self.d_model,
+                padding_idx=0  # <PAD> at index 0
+            )
+            # Explicitly zero the PAD embedding (nn.Embedding padding_idx may not auto-zero)
+            with torch.no_grad():
+                self.adduct_embedding.weight[0] = 0.
+            self.ce_mlp = FeedForward(
+                in_dim=1, hidden_dim=self.d_model, out_dim=self.d_model, depth=2,
+                dropout=args.dropout, bias=True
+            )
 
         # Stack of the Transformer encoder layers (i.e. BERT)
         # (batch_size, peaks_n, d_model) -> (batch_size, peaks_n, d_model)
@@ -135,7 +153,7 @@ class DreaMS(pl.LightningModule):
         if self.ret_order_loss_w:
             self.ro_out = nn.Linear(2 * self.d_model, 1, bias=False)
 
-    def forward(self, spec, charge=None):
+    def forward(self, spec, charge=None, adduct=None, collision_energy=None):
         """ Returns embeddings from the last Transformer encoder layer. """
 
         # Generate padding mask
@@ -176,6 +194,32 @@ class DreaMS(pl.LightningModule):
                 graphormer_dists = spec[..., 0].unsqueeze(2) - spec[..., 0].unsqueeze(1)
                 graphormer_dists = graphormer_dists.unsqueeze(-1)
 
+        # Independent token strategy: prepend adduct + CE tokens to peak sequence
+        if self.enable_cond_tokens:
+            if adduct is None or collision_energy is None:
+                raise ValueError('adduct and collision_energy required when enable_cond_tokens=True')
+            # Adduct embedding: (batch,) -> (batch, 1, d_model)
+            adduct_embs = self.adduct_embedding(adduct).unsqueeze(1)
+            # CE MLP: (batch,) -> (batch, 1, 1) -> (batch, 1, d_model)
+            ce_embs = self.ce_mlp(collision_energy.unsqueeze(-1).unsqueeze(-1))
+            # Build new sequence: [precursor(0), adduct(1), CE(2), fragment_peaks(3...)]
+            spec = torch.cat([spec[:, :1, :], adduct_embs, ce_embs, spec[:, 1:, :]], dim=1)
+            # Adjust padding mask: condition tokens are never padding
+            batch = adduct.shape[0]
+            cond_pad = torch.zeros(batch, 2, device=spec.device, dtype=padding_mask.dtype)
+            padding_mask = torch.cat([padding_mask[:, :1], cond_pad, padding_mask[:, 1:]], dim=1)
+            # Adjust graphormer distances: zero bias for condition tokens
+            if graphormer_dists is not None:
+                n_orig = graphormer_dists.shape[2]
+                d_g = graphormer_dists.shape[3]
+                zeros_cond_row = torch.zeros(batch, 2, n_orig, d_g, device=spec.device, dtype=spec.dtype)
+                graphormer_dists = torch.cat([graphormer_dists[:, :1, :, :], zeros_cond_row,
+                                              graphormer_dists[:, 1:, :, :]], dim=1)
+                n_new = graphormer_dists.shape[1]
+                zeros_cond_col = torch.zeros(batch, n_new, 2, d_g, device=spec.device, dtype=spec.dtype)
+                graphormer_dists = torch.cat([graphormer_dists[:, :, :1, :], zeros_cond_col,
+                                              graphormer_dists[:, :, 1:, :]], dim=2)
+
         # Transformer encoder blocks
         if self.vanilla_transformer:
             spec = self.transformer_encoder(spec, src_key_padding_mask=padding_mask)
@@ -184,20 +228,29 @@ class DreaMS(pl.LightningModule):
 
         return spec
 
-    def spec_ssl_step(self, spec_mask, spec_real, mask, charge):
+    def spec_ssl_step(self, spec_mask, spec_real, mask, charge, adduct=None, collision_energy=None):
 
         if self.train_objective.startswith('mask'):
+
+            # Condition tokens: adjust mask to account for prepended tokens
+            if self.enable_cond_tokens:
+                # Insert False at positions 1,2 (condition tokens are never masked)
+                batch, n_orig = mask.shape
+                cond_mask = torch.zeros(batch, 2, device=mask.device, dtype=mask.dtype)
+                adjusted_mask = torch.cat([mask[:, :1], cond_mask, mask[:, 1:]], dim=1)
+            else:
+                adjusted_mask = mask
 
             # Select only predicted and real values corresponding to masked tokens
             # NOTE: [mask] performs (bs, n, d) -> (bs * n mask True bits, d) reshaping
             # NOTE: [mask] is applied to predictions later in-place to keep pred_embs as a return value
-            pred_embs = self(spec_mask, charge)
+            pred_embs = self(spec_mask, charge, adduct, collision_energy)
             real = spec_real[mask]
 
             if self.train_objective.endswith('hot'):
 
                 # Decode peak embeddings to one hot m/z classes
-                pred_mz = self.ff_out(pred_embs[mask])
+                pred_mz = self.ff_out(pred_embs[adjusted_mask])
 
                 # Convert ground-truth m/z values to one-hot classes
                 real_mz = su.to_hot(real[..., [0]], max_val=self.dformat.max_mz, bin_size=self.hot_mz_bin_size)
@@ -212,7 +265,7 @@ class DreaMS(pl.LightningModule):
                     real_intens = su.to_hot(real[..., [1]], max_val=1.0, bin_size=0.05)
 
                     # Decode peak embeddings to one hot intensity classes
-                    pred_intens = self.ff_out_intens(pred_embs[mask])
+                    pred_intens = self.ff_out_intens(pred_embs[adjusted_mask])
 
                     # Compute loss
                     loss += 0.5 * F.cross_entropy(pred_intens, real_intens, reduction='none')
@@ -221,7 +274,7 @@ class DreaMS(pl.LightningModule):
                 if self.entropy_label_smoothing > 0:
                     loss -= self.entropy_label_smoothing * torch.distributions.Categorical(p_mz).entropy().mean()
             elif self.train_objective == 'mask_mz':
-                pred_mz = self.ff_out(pred_embs[mask])
+                pred_mz = self.ff_out(pred_embs[adjusted_mask])
                 real_mz = real[..., [0]]
                 loss = self.mz_masking_loss(pred_mz, real_mz)
             else:
@@ -254,7 +307,9 @@ class DreaMS(pl.LightningModule):
             # Masking SSL for 1st spectrum
             loss1, embs1, pred_mz1, real_mz1 = self.spec_ssl_step(
                 data['spec_mask_1'], data['spec_real_1'], data['mask_1'],
-                data['charge_1'] if 'charge_1' in data.keys() else None
+                data['charge_1'] if 'charge_1' in data.keys() else None,
+                data['adduct'] if self.enable_cond_tokens and 'adduct' in data.keys() else None,
+                data['collision_energy'] if self.enable_cond_tokens and 'collision_energy' in data.keys() else None
             )
             if 'spec_weight_1' in data.keys():
                 loss1 = self.__weight_loss(loss1, data['spec_weight_1'], peak_mask=data['mask_1'])
@@ -270,7 +325,9 @@ class DreaMS(pl.LightningModule):
             # Masking SSL for 2nd spectrum
             loss2, embs2, pred_mz2, real_mz2 = self.spec_ssl_step(
                 data['spec_mask_2'], data['spec_real_2'], data['mask_2'],
-                data['charge_2'] if 'charge_2' in data.keys() else None
+                data['charge_2'] if 'charge_2' in data.keys() else None,
+                data['adduct'] if self.enable_cond_tokens and 'adduct' in data.keys() else None,
+                data['collision_energy'] if self.enable_cond_tokens and 'collision_energy' in data.keys() else None
             )
             if 'spec_weight_2' in data.keys():
                 loss2 = self.__weight_loss(loss1, data['spec_weight_2'], peak_mask=data['mask_2'])
@@ -300,7 +357,9 @@ class DreaMS(pl.LightningModule):
         else:
             loss, embs, pred_mz, real_mz = self.spec_ssl_step(
                 data['spec_mask'], data['spec_real'], data['mask'],
-                data['charge'] if 'charge' in data.keys() else None
+                data['charge'] if 'charge' in data.keys() else None,
+                data['adduct'] if self.enable_cond_tokens and 'adduct' in data.keys() else None,
+                data['collision_energy'] if self.enable_cond_tokens and 'collision_energy' in data.keys() else None
             )
             if 'spec_weight' in data.keys():
                 loss = self.__weight_loss(loss, data['spec_weight'], peak_mask=data['mask'])

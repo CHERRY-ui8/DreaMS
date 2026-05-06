@@ -17,7 +17,10 @@ import time
 import io as std_io
 import wandb
 with contextlib.redirect_stderr(std_io.StringIO()):
-    import pyopenms as pyms
+    try:
+        import pyopenms as pyms
+    except ImportError:
+        pyms = None
 import traceback
 from collections import Counter
 from functools import cache
