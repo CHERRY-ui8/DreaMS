@@ -82,6 +82,10 @@ def parse_args():
     parser.add_argument('--prec_intens', type=float, help='Precursor peak is prepended to spectrum with given '
                                                           'intensity.')
     parser.add_argument('--charge_feature', action='store_true')
+    parser.add_argument('--enable_cond_tokens', action='store_true',
+                        help='Prepend adduct and CE tokens as independent tokens to the peak sequence.')
+    parser.add_argument('--ce_max', type=float, default=200.,
+                        help='Max collision energy value for normalization (CE /= ce_max -> [0, 1]).')
     parser.add_argument('--graphormer_mz_diffs', action='store_true')
     parser.add_argument('--graphormer_parametrized', action='store_true')
 

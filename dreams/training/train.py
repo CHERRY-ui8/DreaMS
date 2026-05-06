@@ -53,8 +53,13 @@ def main(args):
             frac_masks=args.frac_masks, mask_prec=args.mask_prec, mask_peaks=args.mask_peaks,
             mask_intens_strategy=args.mask_intens_strategy, ret_order_pairs=args.ret_order_loss_w != 0,
             acc_est_weight=args.acc_est_weight, lsh_weight=args.lsh_weight, mask_val=args.mask_val,
-            bert801010_masking=args.bert801010_masking
+            bert801010_masking=args.bert801010_masking,
+            enable_cond_tokens=args.enable_cond_tokens, ce_max=args.ce_max
         )
+
+        # Propagate adduct vocabulary size to args for model constructor
+        if args.enable_cond_tokens:
+            args.adduct_vocab_size = len(dataset.adduct_vocab)
 
         # with h5py.File(args.dataset_pth, 'r') as f:
         #     split_col = f['val'][:] if 'val' in f.keys() else None

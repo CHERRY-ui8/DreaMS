@@ -1018,7 +1018,7 @@ class MaskedSpectraDataset(Dataset):
                  mask_peaks=True, mask_intens_strategy='intens_p', frac_masks=0.2, min_n_masks=2, mask_val=-1.,
                  min_mask_intens=0.1, mask_prec=False, n_samples=None, logger=None, deterministic_mask=True,
                  ret_order_pairs=False, return_charge=False, acc_est_weight=False, lsh_weight=False,
-                 bert801010_masking=False):
+                 bert801010_masking=False, enable_cond_tokens=False, ce_max=200.):
         """
         Initialize the MaskedSpectraDataset.
 
@@ -1066,6 +1066,12 @@ class MaskedSpectraDataset(Dataset):
         self.acc_est_weight = acc_est_weight
         self.lsh_weight = lsh_weight
         self.bert801010_masking = bert801010_masking
+        self.enable_cond_tokens = enable_cond_tokens
+        self.ce_max = ce_max
+        self.adduct_vocab = None  # built below if enable_cond_tokens
+        self.adduct_to_idx = None
+
+        # Condition tokens: build adduct vocabulary below after data loading
 
         # Load dataset features
         features = [SPECTRUM, PRECURSOR_MZ]
@@ -1077,6 +1083,8 @@ class MaskedSpectraDataset(Dataset):
             features.append('instrument accuracy est.')
         if self.lsh_weight:
             features.append('lsh')
+        if self.enable_cond_tokens:
+            features += [ADDUCT, COLLISION_ENERGY]
 
         if in_pth.suffix == '.hdf5':
             with h5py.File(in_pth, 'r') as f:
@@ -1095,6 +1103,30 @@ class MaskedSpectraDataset(Dataset):
             self.data[PRECURSOR_MZ] = np.stack(df['PRECURSOR M/Z'])
         else:
             raise ValueError(f'Not supported input format {in_pth.suffix} of the data file {in_pth}.')
+
+        # Build adduct vocabulary from dataset (when condition tokens enabled)
+        if self.enable_cond_tokens:
+            if ADDUCT not in self.data:
+                raise ValueError(f'Column \"{ADDUCT}\" required for condition tokens but not in dataset.')
+            raw_adducts = self.data[ADDUCT]
+            # Decode bytes to strings if needed
+            if isinstance(raw_adducts[0], bytes):
+                raw_adducts = [a.decode('utf-8') for a in raw_adducts]
+            unique_adducts = sorted(set(raw_adducts))
+            self.adduct_vocab = ['<PAD>', '<UNK>'] + unique_adducts
+            self.adduct_to_idx = {a: i for i, a in enumerate(self.adduct_vocab)}
+            if logger:
+                logger.info(f'Built adduct vocabulary: {len(self.adduct_vocab)} tokens '
+                            f'({len(unique_adducts)} unique adducts + PAD + UNK)')
+            # Convert adduct strings to indices in place
+            self.data[ADDUCT] = np.array([self.adduct_to_idx.get(
+                a.decode('utf-8') if isinstance(a, bytes) else a,
+                self.adduct_to_idx['<UNK>']
+            ) for a in raw_adducts], dtype=np.int16)
+            # Normalize CE to [0, 1]
+            if COLLISION_ENERGY not in self.data:
+                raise ValueError(f'Column \"{COLLISION_ENERGY}\" required for condition tokens but not in dataset.')
+            self.data[COLLISION_ENERGY] = self.data[COLLISION_ENERGY].astype(np.float32) / self.ce_max
 
         # Construct the mapping from file names to corresponding spectra to sample retention order pairs
         if self.ret_order_pairs:
@@ -1234,6 +1266,10 @@ class MaskedSpectraDataset(Dataset):
 
         if self.return_charge:
             item[CHARGE] = self.data[CHARGE][i] / self.dformat.max_charge
+
+        if self.enable_cond_tokens:
+            item[ADDUCT] = self.data[ADDUCT][i]
+            item[COLLISION_ENERGY] = self.data[COLLISION_ENERGY][i]
 
         if self.acc_est_weight:
             acc_weight = self.data['instrument accuracy est.'][i]
