@@ -7,12 +7,9 @@ here = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
     long_description = f.read()
 
-# Platform-specific pyopenms version (TMP workaround for macOS)
+# pyopenms: use 3.3.0 everywhere; 3.4.0 is not published on PyPI for many cp311/manylinux wheels yet.
 def get_pyopenms_dep():
-    if sys.platform.lower().startswith("darwin"):
-        return "pyopenms==3.3.0"  # macOS
-    else:  # sys.platform.lower().startswith("linux"):
-        return "pyopenms==3.4.0"  # Linux or other platforms
+    return "pyopenms==3.3.0"
 
 setup(
     name="dreams",

@@ -11,8 +11,9 @@ from io import BytesIO
 from tqdm import tqdm
 from rdkit import DataStructs, RDLogger
 from rdkit.Chem import AllChem as Chem
-from rdkit.Chem import rdchem, Draw, rdMolDescriptors, QED, Crippen, Lipinski
-from rdkit.Chem.Draw import rdMolDraw2D
+from rdkit.Chem import rdchem, rdMolDescriptors, QED, Crippen, Lipinski
+# Draw/rdMolDraw2D are imported inside functions that need them so headless installs
+# without libXrender (e.g. minimal Linux containers) can import this module.
 from rdkit.Chem.MACCSkeys import GenMACCSKeys
 from rdkit.Contrib.SA_Score import sascorer
 from rdkit.Chem.Descriptors import ExactMolWt
@@ -39,6 +40,8 @@ def show_mols(mols, legends='new_indices', smiles_in=None, svg=False, sort_by_le
     :param mols_per_row: number of molecules per row to show
     :param save_pth: path to save the .svg image to
     """
+    from rdkit.Chem import Draw
+
     disable_rdkit_log()
 
     if smiles_in is None:
@@ -354,6 +357,8 @@ def mol_to_img_str(mol, svg_size=200):
     """
     Supposed to be used with `pyvis` for showing molecule images as graph nodes.
     """
+    from rdkit.Chem.Draw import rdMolDraw2D
+
     buffered = BytesIO()
     d2d = rdMolDraw2D.MolDraw2DSVG(svg_size, svg_size)
     opts = d2d.drawOptions()
