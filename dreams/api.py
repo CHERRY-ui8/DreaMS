@@ -36,6 +36,128 @@ class PreTrainedModel:
         self.model = model.eval()
         self.n_highest_peaks = n_highest_peaks
 
+    @staticmethod
+    def _load_dreams_checkpoint(ckpt_path, map_location='cpu', **kwargs):
+        """
+        Load a DreaMS checkpoint manually, bypassing PyTorch Lightning's
+        load_from_checkpoint which has PyTorch 2.6+ weights_only issues.
+        """
+        import sys, types, pathlib, argparse, warnings as py_warnings
+        py_warnings.filterwarnings('ignore')
+        # Register msml mock module for checkpoint deserialization
+        if 'msml' not in sys.modules:
+            import dreams.utils.data as du
+            import dreams.utils.dformats as dformats
+            import dreams.utils.spectra as su
+            import dreams.models.dreams.dreams as dm
+            import dreams.models.dreams.layers as dl
+            import dreams.models.layers.fourier_features as ff
+            import dreams.models.layers.feed_forward as fw
+            for ns in ['msml', 'msml.models', 'msml.models.dreams',
+                       'msml.models.layers', 'msml.utils']:
+                sys.modules[ns] = types.ModuleType(ns)
+            sys.modules['msml.models.dreams.dreams'] = dm
+            sys.modules['msml.models.dreams.layers'] = dl
+            sys.modules['msml.models.layers.fourier_features'] = ff
+            sys.modules['msml.models.layers.feed_forward'] = fw
+            sys.modules['msml.utils.data'] = du
+            sys.modules['msml.utils.dformats'] = dformats
+            sys.modules['msml.utils.spectra'] = su
+
+        torch.serialization.add_safe_globals([pathlib.PosixPath, pathlib.WindowsPath, argparse.Namespace])
+
+        # Load raw checkpoint
+        ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=False)
+
+        # Extract args from checkpoint
+        hp = ckpt['hyper_parameters']
+        args_dict = hp['args'] if isinstance(hp, dict) and 'args' in hp else hp
+        if hasattr(args_dict, '__dict__'):
+            args_dict = vars(args_dict)
+
+        # If kwargs has args, use those instead (for cond-token reload)
+        if 'args' in kwargs:
+            new_args_dict = vars(kwargs['args'])
+            # Merge: use new args, but keep old ones for keys not in new
+            args_dict.update(new_args_dict)
+            args = Namespace(**args_dict)
+        else:
+            args = Namespace(**args_dict)
+
+        from dreams.utils.data import SpectrumPreprocessor
+        from dreams.utils.dformats import DataFormatA
+        dformat = DataFormatA()
+        spec_preproc = SpectrumPreprocessor(dformat=dformat, n_highest_peaks=args.max_peaks_n
+                                            if hasattr(args, 'max_peaks_n') else 60)
+        args.dformat = dformat
+        # Set d_model if not explicitly present (it's computed inside __init__)
+        if not hasattr(args, 'd_model'):
+            d_mz = args.d_mz_token if hasattr(args, 'd_mz_token') and args.d_mz_token else 0
+            args.d_model = (args.d_fourier if hasattr(args, 'd_fourier') and args.d_fourier else 0
+                           ) + (args.d_peak if hasattr(args, 'd_peak') and args.d_peak else 0) + d_mz
+
+        # Construct model
+        model = DreaMSModel(args, spec_preproc)
+
+        # Load state dict (strict=False to allow missing cond-token keys when adding them)
+        state_dict = ckpt['state_dict']
+        # Filter out fine-tuning head keys that may have mismatched shapes
+        model.load_state_dict(state_dict, strict=False)
+
+        return model
+
+    @classmethod
+    def from_pretrained_backbone(
+        cls,
+        enable_cond_tokens: bool = False,
+        adduct_vocab_size: int = 0,
+        n_highest_peaks: int = 60,
+        ce_max: float = 200.0,
+        remove_unused_backbone_parameters: bool = True,
+    ):
+        """
+        Load the pretrained DreaMS backbone (ssl_model.ckpt), optionally
+        with independent cond tokens (adduct embedding + CE MLP).
+
+        Args:
+            enable_cond_tokens: If True, prepend adduct + CE tokens to sequence.
+            adduct_vocab_size: Vocabulary size for adduct embedding (e.g. 101).
+            n_highest_peaks: Number of highest peaks for spectrum preprocessing.
+            ce_max: Max CE value for normalization.
+            remove_unused_backbone_parameters: Remove fine-tuning heads.
+        """
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        ckpt_path = PRETRAINED / 'ssl_model.ckpt'
+
+        # Download if needed
+        if not ckpt_path.exists():
+            ckpt_path = utils.download_pretrained_model('ssl_model.ckpt')
+
+        # Load checkpoint to get original args
+        ckpt = cls._load_dreams_checkpoint(ckpt_path, map_location=device)
+
+        # Build args with cond-token overrides
+        from argparse import Namespace
+        orig_args = vars(ckpt.hparams["args"])
+        if enable_cond_tokens:
+            orig_args['enable_cond_tokens'] = True
+            orig_args['ce_max'] = ce_max
+            orig_args['adduct_vocab_size'] = adduct_vocab_size
+        else:
+            orig_args['enable_cond_tokens'] = False
+            orig_args['ce_max'] = ce_max
+            orig_args['adduct_vocab_size'] = 0
+
+        # Reload with updated args
+        args = Namespace(**orig_args)
+        model = cls._load_dreams_checkpoint(ckpt_path, map_location=device, args=args)
+
+        # Clean up unused heads
+        if remove_unused_backbone_parameters:
+            model = cls.remove_unused_backbone_parameters(model)
+
+        return cls(model, n_highest_peaks=n_highest_peaks)
+
     def remove_unused_backbone_parameters(model):
         """Helper function to remove unused heads from the pre-trained DreaMS backbone model."""
         if hasattr(model, 'ff_out'):
@@ -60,14 +182,14 @@ class PreTrainedModel:
 
         if ckpt_cls == DreaMSModel:
 
-            ckpt = ckpt_cls.load_from_checkpoint(ckpt_path, map_location=device)
+            ckpt = cls._load_dreams_checkpoint(ckpt_path, map_location=device)
 
             # If DreaMS arguments are provided, reload the model with the updated arguments
             # (first load is needed to get the original arguments)
             if dreams_args is not None:
                 args_dict = vars(ckpt.hparams["args"])
                 args_dict.update(dreams_args)
-                ckpt = ckpt_cls.load_from_checkpoint(ckpt_path, map_location=device, args=Namespace(**args_dict))
+                ckpt = cls._load_dreams_checkpoint(ckpt_path, map_location=device, args=Namespace(**args_dict))
 
             model = cls(
                 ckpt,
@@ -181,13 +303,22 @@ def dreams_predictions(
 
     # Compute predictions
     model = model_ckpt.model
+    use_cond = getattr(model, 'enable_cond_tokens', False)
     # TODO: consider model name
     if not title:
         title = 'DreaMS_prediction'
 
     # Preallocate memory for predictions
     num_samples = len(spectra)
-    output_shape = model(next(iter(dataloader))[SPECTRUM].to(device=model.device, dtype=model.dtype)).shape[1:]
+    first_batch = next(iter(dataloader))
+    sample_spec = first_batch[SPECTRUM].to(device=model.device, dtype=model.dtype)
+    if use_cond and ADDUCT in first_batch and COLLISION_ENERGY in first_batch:
+        sample_out = model(sample_spec, charge=None,
+                           adduct=first_batch[ADDUCT].to(model.device),
+                           collision_energy=first_batch[COLLISION_ENERGY].to(model.device))
+    else:
+        sample_out = model(sample_spec)
+    output_shape = sample_out.shape[1:]
     preds = torch.zeros((num_samples, *output_shape), dtype=model.dtype)
 
     progress_bar = tqdm(
@@ -200,7 +331,13 @@ def dreams_predictions(
     start_idx = 0
     for batch in dataloader:
         with torch.inference_mode():
-            pred = model(batch[SPECTRUM].to(device=model.device, dtype=model.dtype))
+            spec_t = batch[SPECTRUM].to(device=model.device, dtype=model.dtype)
+            if use_cond and ADDUCT in batch and COLLISION_ENERGY in batch:
+                pred = model(spec_t, charge=None,
+                             adduct=batch[ADDUCT].to(model.device),
+                             collision_energy=batch[COLLISION_ENERGY].to(model.device))
+            else:
+                pred = model(spec_t)
 
             # Store predictions to cpu to avoid high memory allocation issues
             batch_size = pred.shape[0]
@@ -219,10 +356,21 @@ def dreams_predictions(
     return preds
 
 
-def dreams_embeddings(pth, model_pth=DREAMS_EMBEDDING, batch_size=32, progress_bar=True, logger_pth=None, store_embs=False, **msdata_kwargs):
+def dreams_embeddings(pth, model_pth=DREAMS_EMBEDDING, batch_size=32, progress_bar=True, logger_pth=None, store_embs=False,
+                      enable_cond_tokens=False, adduct_vocab_size=0, ce_max=200.0, **msdata_kwargs):
+    if enable_cond_tokens:
+        model_ckpt = PreTrainedModel.from_pretrained_backbone(
+            enable_cond_tokens=True,
+            adduct_vocab_size=adduct_vocab_size,
+            n_highest_peaks=60,
+            ce_max=ce_max,
+        )
+    else:
+        model_ckpt = model_pth
     return dreams_predictions(
-        model_ckpt=model_pth, spectra=pth, model_cls=ContrastiveHead, batch_size=batch_size, progress_bar=progress_bar,
-        logger_pth=logger_pth, store_preds=store_embs, **msdata_kwargs, title=DREAMS_EMBEDDING
+        model_ckpt=model_ckpt, spectra=pth, model_cls=ContrastiveHead if not enable_cond_tokens else None,
+        batch_size=batch_size, progress_bar=progress_bar, logger_pth=logger_pth,
+        store_preds=store_embs, **msdata_kwargs, title=DREAMS_EMBEDDING
     )
 
 

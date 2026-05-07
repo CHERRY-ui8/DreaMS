@@ -199,7 +199,7 @@ class DreaMS(pl.LightningModule):
             if adduct is None or collision_energy is None:
                 raise ValueError('adduct and collision_energy required when enable_cond_tokens=True')
             # Adduct embedding: (batch,) -> (batch, 1, d_model)
-            adduct_embs = self.adduct_embedding(adduct).unsqueeze(1)
+            adduct_embs = self.adduct_embedding(adduct.long()).unsqueeze(1)
             # CE MLP: (batch,) -> (batch, 1, 1) -> (batch, 1, d_model)
             ce_embs = self.ce_mlp(collision_energy.unsqueeze(-1).unsqueeze(-1))
             # Build new sequence: [precursor(0), adduct(1), CE(2), fragment_peaks(3...)]

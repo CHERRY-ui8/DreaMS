@@ -347,6 +347,7 @@ def read_textual_ms_format(
         prec_mz_name=['PEPMASS', 'PRECURSORMZ', 'PRECURSOR_MZ'],
         charge_name=['CHARGE'],
         adduct_name=['ADDUCT'],
+        collision_energy_name=['COLLISION_ENERGY', 'CE'],
         smiles_name=['SMILES'],
         rt_name=['RTINSECONDS', 'RETENTION_TIME', 'RTINMINUTES', 'RT'],
         ionmode_name=['IONMODE'],
@@ -373,6 +374,9 @@ def read_textual_ms_format(
     if adduct_name:
         for adduct_name_i in adduct_name:
             attr_mapping[adduct_name_i] = ADDUCT
+    if collision_energy_name:
+        for ce_name_i in collision_energy_name:
+            attr_mapping[ce_name_i] = COLLISION_ENERGY
     if smiles_name:
         for smiles_name_i in smiles_name:
             attr_mapping[smiles_name_i] = SMILES

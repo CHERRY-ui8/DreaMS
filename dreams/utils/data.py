@@ -406,7 +406,14 @@ class MSData:
         if label is not None:
             return LabeledSpectraDataset(msdata=self, label=label, spec_preproc=spec_preproc, **kwargs)
         else:
-            return RawSpectraDataset(self.get_spectra(), self.get_prec_mzs(), spec_preproc, **kwargs)
+            # Automatically pass adduct and CE if available in columns
+            cols = self.columns()
+            extra_kwargs = dict(kwargs)
+            if ADDUCT in cols:
+                extra_kwargs.setdefault('adducts', self.get_values(ADDUCT))
+            if COLLISION_ENERGY in cols:
+                extra_kwargs.setdefault('collision_energies', self.get_values(COLLISION_ENERGY))
+            return RawSpectraDataset(self.get_spectra(), self.get_prec_mzs(), spec_preproc, **extra_kwargs)
 
     def to_pandas(self, unpad=True, ignore_cols=(DREAMS_EMBEDDING,)):
         df = {col: self.get_values(col) for col in self.columns() if col not in ignore_cols}
@@ -1408,17 +1415,26 @@ class LabeledSpectraDataset(Dataset):
 
 
 class RawSpectraDataset(Dataset):
-    def __init__(self, spectra, prec_mzs, spec_preproc: SpectrumPreprocessor):
+    def __init__(self, spectra, prec_mzs, spec_preproc: SpectrumPreprocessor,
+                 adducts=None, collision_energies=None, ce_max=200.0):
         self.spectra = spectra
         self.prec_mzs = prec_mzs
         self.spec_preproc = spec_preproc
+        self.adducts = adducts
+        self.collision_energies = collision_energies
+        self.ce_max = ce_max
 
     def __len__(self):
         return len(self.spectra)
 
     def __getitem__(self, i):
         spectrum = self.spec_preproc(self.spectra[i], prec_mz=self.prec_mzs[i], high_form=False)
-        return {SPECTRUM: spectrum, PRECURSOR_MZ: self.prec_mzs[i]}
+        item = {SPECTRUM: spectrum, PRECURSOR_MZ: self.prec_mzs[i]}
+        if self.adducts is not None:
+            item[ADDUCT] = self.adducts[i]
+        if self.collision_energies is not None:
+            item[COLLISION_ENERGY] = self.collision_energies[i]
+        return item
 
 
 class MatchmsSpectraDataset(Dataset):
