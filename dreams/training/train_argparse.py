@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument('--train_regime', type=str, required=True, choices=['pre-training', 'fine-tuning',
         'cv-fine-tuning'])
     parser.add_argument('--hot_mz_bin_size', type=float)
-    parser.add_argument('--frac_masks', type=float)
+    parser.add_argument('--frac_masks', type=float, default=0.3)
     parser.add_argument('--train_objective', type=str, required=True, choices=['mask_peak', 'mask_mz', 'mask_intensity',
         'mask_mz_hot', 'mask_peak_hot', 'shuffling', 'num_C', 'num_O', 'has_N', 'has_Cl', 'has_F', 'qed', 'fp_rdkit_2048',
         'fp_rdkit_4096', 'fp_morgan_2048', 'fp_morgan_4096', 'mol_props', 'contrastive_spec_embs'])
@@ -68,18 +68,18 @@ def parse_args():
     parser.add_argument('--cos_reg_reduction', type=str, choices=['max', 'mean'])
 
     # Model (MS-specific hyperparameters)
-    parser.add_argument('--d_fourier', type=int)
-    parser.add_argument('--d_peak', type=int)
-    parser.add_argument('--ff_out_depth', type=int)
-    parser.add_argument('--ff_peak_depth', type=int)
-    parser.add_argument('--ff_fourier_depth', type=int)
-    parser.add_argument('--ff_fourier_d', type=str)
-    parser.add_argument('--fourier_strategy', type=str)
+    parser.add_argument('--d_fourier', type=int, default=980)
+    parser.add_argument('--d_peak', type=int, default=44)
+    parser.add_argument('--ff_out_depth', type=int, default=1)
+    parser.add_argument('--ff_peak_depth', type=int, default=1)
+    parser.add_argument('--ff_fourier_depth', type=int, default=5)
+    parser.add_argument('--ff_fourier_d', type=str, default='512')
+    parser.add_argument('--fourier_strategy', type=str, default='lin_float_int')
     parser.add_argument('--fourier_trainable', action='store_true')
     parser.add_argument('--fourier_num_freqs', type=int)
     parser.add_argument('--fourier_min_freq', type=float)
     parser.add_argument('--d_mz_token', type=int)
-    parser.add_argument('--prec_intens', type=float, help='Precursor peak is prepended to spectrum with given '
+    parser.add_argument('--prec_intens', type=float, default=1.1, help='Precursor peak is prepended to spectrum with given '
                                                           'intensity.')
     parser.add_argument('--charge_feature', action='store_true')
     parser.add_argument('--enable_cond_tokens', action='store_true',
@@ -92,8 +92,8 @@ def parse_args():
     # Model (Transformer-specific hyperparameters)
     parser.add_argument('--vanilla_transformer', action='store_true')
     parser.add_argument('--pre_norm', action='store_true')
-    parser.add_argument('--n_heads', type=int)
-    parser.add_argument('--n_layers', type=int)
+    parser.add_argument('--n_heads', type=int, default=8)
+    parser.add_argument('--n_layers', type=int, default=7)
     parser.add_argument('--scnorm', action='store_true')
     parser.add_argument('--attn_mech', type=str, default='dot-product',
                         choices=['dot-product', 'additive_v', 'additive_fixed'])
