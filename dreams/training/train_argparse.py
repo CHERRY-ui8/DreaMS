@@ -48,7 +48,7 @@ def parse_args():
     # Model (loss)
     parser.add_argument('--train_regime', type=str, required=True, choices=['pre-training', 'fine-tuning',
         'cv-fine-tuning'])
-    parser.add_argument('--hot_mz_bin_size', type=float)
+    parser.add_argument('--hot_mz_bin_size', type=float, default=0.05)
     parser.add_argument('--frac_masks', type=float, default=0.3)
     parser.add_argument('--train_objective', type=str, required=True, choices=['mask_peak', 'mask_mz', 'mask_intensity',
         'mask_mz_hot', 'mask_peak_hot', 'shuffling', 'num_C', 'num_O', 'has_N', 'has_Cl', 'has_F', 'qed', 'fp_rdkit_2048',
@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument('--mask_peaks', action='store_true')
     parser.add_argument('--mask_intens_strategy', type=str, default='intens_cutoff')
     parser.add_argument('--ret_order_loss_w', type=float, default=0.0)
-    parser.add_argument('--focal_loss_gamma', default=0.0, type=float, help='Gamma term for m/z masking focal loss or '
+    parser.add_argument('--focal_loss_gamma', default=5.0, type=float, help='Gamma term for m/z masking focal loss or '
                         'classification fine-tuning tasks loss. With gamma equal to zero the loss is equivalent to '
                         'cross-entropy.')
     parser.add_argument('--focal_loss_alpha', default=None, type=float)
@@ -104,12 +104,12 @@ def parse_args():
     parser.add_argument('--lr', type=float, required=True)
     parser.add_argument('--max_epochs', type=int, default=3000)
     parser.add_argument('--train_precision', type=int, default=32)
-    parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--att_dropout', type=float, default=0.0)
-    parser.add_argument('--residual_dropout', type=float, default=0.0)
-    parser.add_argument('--ff_dropout', type=float, default=0.0)
+    parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--att_dropout', type=float, default=0.1)
+    parser.add_argument('--residual_dropout', type=float, default=0.1)
+    parser.add_argument('--ff_dropout', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0)
-    parser.add_argument('--n_warmup_steps', type=int, default=0)
+    parser.add_argument('--n_warmup_steps', type=int, default=5000)
     parser.add_argument('--entropy_label_smoothing', type=float, default=0)
 
     # Validation
