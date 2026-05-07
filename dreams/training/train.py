@@ -4,7 +4,7 @@ import pandas as pd
 import pytorch_lightning as pl
 import wandb
 import time
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, CSVLogger
 from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor
 from pathlib import Path
@@ -237,17 +237,18 @@ def main(args):
         if args.train_precision == 64:
             model = model.double()
 
-        # Define wandb log
+        # Define loggers: always use CSVLogger, optionally add WandbLogger
+        csv_logger = CSVLogger(save_dir=run_dir, name='csv_logs', flush_logs_every_n_steps=10)
+        loggers = [csv_logger]
         if not args.no_wandb:
             if cv:
                 wandb.init(reinit=True, project=args.project_name, name=f'{args.run_name} [fold_{i}]', config=args,
                     group=args.run_name, entity=args.wandb_entity_name)
-                wandb_logger = WandbLogger()
+                loggers.append(WandbLogger())
             else:
-                wandb_logger = WandbLogger(project=args.project_name, name=args.run_name, config=args, 
-                    entity=args.wandb_entity_name)
-        else:
-            wandb_logger = None
+                loggers.append(WandbLogger(project=args.project_name, name=args.run_name, config=args, 
+                    entity=args.wandb_entity_name))
+        trainer_logger = loggers[0] if len(loggers) == 1 else loggers
 
         # Define trainer callbacks (TODO: understand the behavior of find_unused_parameters)
         callbacks = [
@@ -285,7 +286,7 @@ def main(args):
             find_unused_parameters=False if args.train_regime == 'pre-training' else True
         ) if not cv else None
         trainer = pl.Trainer(
-            strategy=strategy, max_epochs=args.max_epochs, logger=wandb_logger if not args.no_wandb else None,
+            strategy=strategy, max_epochs=args.max_epochs, logger=trainer_logger,
             accelerator=device, devices=args.num_devices, log_every_n_steps=args.log_every_n_steps,
             precision=args.train_precision, overfit_batches=args.overfit_batches, callbacks=callbacks,
             num_sanity_val_steps=0, use_distributed_sampler=args.num_devices > 1,
@@ -294,10 +295,10 @@ def main(args):
         )
 
         if not args.no_wandb and trainer.global_rank == 0:
-
             # Watch model on the main process
-            wandb_logger.watch(model, log_graph=False)
-            wandb_logger.experiment.config.update({
+            wb_logger = [l for l in loggers if isinstance(l, WandbLogger)][0]
+            wb_logger.watch(model, log_graph=False)
+            wb_logger.experiment.config.update({
                     'num_params': sum(p.numel() for p in model.parameters() if p.requires_grad)
             })
 
