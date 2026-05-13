@@ -12,6 +12,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -418,7 +419,23 @@ def main():
         model_tag += f'_lora{args.lora_rank}'
     output_dir = os.path.join(args.output_dir, f'{phase_tag}_{model_tag}_{timestamp}')
     os.makedirs(output_dir, exist_ok=True)
+
+    # Tee stdout to both terminal and training.log in output dir
+    log_path = os.path.join(output_dir, 'training.log')
+    log_file = open(log_path, 'w', buffering=1)
+    original_stdout = sys.stdout
+
+    class Tee:
+        def write(self, text):
+            original_stdout.write(text)
+            log_file.write(text)
+        def flush(self):
+            original_stdout.flush()
+            log_file.flush()
+
+    sys.stdout = Tee()
     print(f'\nOutput dir: {output_dir}')
+    print(f'Log: {log_path}')
 
     # Training loop
     print(f'\n=== Training ===')
