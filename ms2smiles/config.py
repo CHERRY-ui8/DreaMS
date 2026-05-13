@@ -49,27 +49,41 @@ class MS2SMILESConfig:
     def chemgpt_config(self) -> str:
         return self.chemgpt_19m_config if self.model_size == '19M' else self.chemgpt_1_2b_config
 
-    # ── Projector ──
-    # If None, projector is nn.Linear(dreams_d_model, decoder_hidden_size)
-    # If [1024], it's Linear→GELU→Linear (one hidden layer)
-    # If [2048, 2048], it's two hidden layers
-    projector_hidden: Optional[list] = None
+    # ── Multi-token prefix conditioning (Fix 1) ──
+    # Number of prefix tokens to prepend (K in multi-token prefix)
+    # Projector outputs K * decoder_hidden_size vectors, reshaped to (B, K, H)
+    k_tokens: int = 4
 
-    # ── Training ──
+    # ── LoRA (Fix 4) ──
+    lora_rank: int = 8
+    lora_alpha: float = 16.0
+    # Which modules to apply LoRA to (comma-separated: q_proj, v_proj, k_proj, out_proj)
+    lora_target_modules: str = 'q_proj,v_proj'
+
+    # ── Training phases (Fix 3) ──
+    # Phase 1 (alignment, 3-5 epochs): train ONLY projector
+    # Phase 2 (lora tuning): train projector + LoRA
+    # Set to '1' or '2' via command line
+    phase: int = 1
+
+    # ── Time-step Loss Reweighting (Fix 2) ──
+    loss_reweight: bool = True
+    # Weights for first N real-token predictions (in order: t1, t2, t3, t4, ...)
+    # After padding with -100 for prefix tokens, shift_labels has:
+    #   [-100, ..., -100, t1, t2, t3, t4, ...] where first real pred is at index (k_tokens-1)
+    loss_reweight_values: tuple = (10.0, 8.0, 5.0, 2.0)
+
+    # ── Training hyperparams ──
     batch_size: int = 32
     max_seq_len: int = 512
     max_epochs: int = 50
     lr_projector: float = 3e-4       # projector higher LR (random init)
     lr_chemgpt_emb: float = 3e-5     # embedding + lm_head
     lr_chemgpt_backbone: float = 1e-5  # attention layers (if unfrozen)
+    lr_lora: float = 3e-4            # LoRA params (random init, higher LR)
     warmup_steps: int = 500
     grad_clip: float = 1.0
     weight_decay: float = 0.01
-
-    # ── Freeze strategy (phase 1) ──
-    # Phase 1: freeze ChemGPT backbone, train only projector + embedding + lm_head
-    # Phase 2: unfreeze everything (set freeze_chemgpt_backbone=False)
-    freeze_chemgpt_backbone: bool = True
 
     # ── Data ──
     data_hdf5: str = '/root/datasets/pairs_with_embs.hdf5'

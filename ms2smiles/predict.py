@@ -1,4 +1,4 @@
-"""Inference: MS embedding → SMILES generation.
+"""Inference: MS embedding → SMILES generation (ChemGPT format).
 
 Usage:
     # From precomputed embedding
@@ -17,6 +17,7 @@ from pathlib import Path
 import torch
 import h5py
 import numpy as np
+import selfies as sf
 
 from ms2smiles.config import MS2SMILESConfig
 from ms2smiles.model import MStoSMILES
@@ -84,7 +85,7 @@ def main():
     # Load model
     print(f'Loading checkpoint: {args.ckpt}')
     model = MStoSMILES(config, device=device)
-    state = torch.load(args.ckpt, map_location=device)
+    state = torch.load(args.ckpt, map_location=device, weights_only=False)
     model.load_state_dict(state['model_state_dict'])
     model.eval()
     print(f'Loaded epoch {state.get("epoch", "?")}, val_loss={state.get("val_loss", "?"):.4f}')
@@ -132,28 +133,42 @@ def main():
 
     # Generate
     print(f'\nGenerating SMILES (beam={args.num_beams}, max_len={args.max_length})...\n')
-    generated = model.generate(
+    generated_chemgpt = model.generate(
         embeddings=embeddings,
         max_length=args.max_length,
         num_beams=args.num_beams,
     )
 
+    # Convert generated SELFIES → standard SMILES via selfies decoder
+    # Note: tokenizer.decode() inserts spaces between tokens; we must strip them
+    # for sf.decoder() which expects contiguous SELFIES like [C][C][Branch1]...
+    generated_smiles = []
+    for g in generated_chemgpt:
+        # Remove spaces: "[C] [O]" → "[C][O]"
+        g_clean = g.replace(' ', '')
+        try:
+            smi = sf.decoder(g_clean)
+        except Exception:
+            smi = g  # fallback: show raw output if decode fails
+        generated_smiles.append(smi)
+
     # Print results
     if ref_smiles_list and len(ref_smiles_list) > 0:
         print(f'{"#"*60}')
-        print(f'Reference: {ref_smiles_list[0]}')
-        print(f'Generated: {generated[0]}')
+        print(f'Reference:  {ref_smiles_list[0]}')
+        print(f'Generated:  {generated_smiles[0]}')
+        print(f'(raw ChemGPT: {generated_chemgpt[0][:80]}...)')
         print(f'{"#"*60}')
     else:
-        for i, smi in enumerate(generated):
+        for i, smi in enumerate(generated_smiles):
             print(f'[{i}] {smi}')
 
     # If multiple samples, print table
-    if len(generated) > 1:
-        print(f'\n--- Results ({len(generated)} samples) ---')
+    if len(generated_smiles) > 1:
+        print(f'\n--- Results ({len(generated_smiles)} samples) ---')
         from rdkit import Chem
         valid = 0
-        for i, (smi, ref) in enumerate(zip(generated, ref_smiles_list)):
+        for i, (smi, ref) in enumerate(zip(generated_smiles, ref_smiles_list)):
             mol = Chem.MolFromSmiles(smi)
             is_valid = mol is not None
             if is_valid:
@@ -163,7 +178,7 @@ def main():
             print(f'  [{i}] ref={ref}')
             print(f'       gen={smi}  {"✓ valid" if is_valid else "✗ invalid"} {match}')
 
-        print(f'\nValid SMILES rate: {valid}/{len(generated)} ({100*valid/len(generated):.1f}%)')
+        print(f'\nValid SMILES rate: {valid}/{len(generated_smiles)} ({100*valid/len(generated_smiles):.1f}%)')
 
     print('\nDone!')
 

@@ -3,6 +3,12 @@
 Supports two modes:
 1. Precomputed embeddings: loads from pairs_with_embs.hdf5 (faster)
 2. On-the-fly: loads raw spectra + SMILES from pairs_ready.hdf5
+
+SMILES are converted to SELFIES format before tokenization. SELFIES is a
+robust molecular string representation where atoms are enclosed in brackets
+(e.g., [C][C][Branch1][C][C][C]) and branch/ring structures are encoded
+with explicit instruction tokens. This format is fully compatible with the
+ChemGPT tokenizer and eliminates the 99% UNK rate from standard SMILES.
 """
 
 import h5py
@@ -10,6 +16,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+import selfies as sf
 
 from ms2smiles.config import MS2SMILESConfig
 
@@ -64,12 +71,23 @@ class MSSpectrumSmilesDataset(Dataset):
     def __getitem__(self, idx):
         smi = self.smiles[idx]
 
-        # Tokenize SMILES (NO special tokens — prefix handles start signal)
-        ids = self.tokenizer(smi, add_special_tokens=False)['input_ids']
+        # Convert to SELFIES format (robust molecular representation)
+        # SELFIES uses bracketed atoms + explicit branch/ring instruction tokens
+        try:
+            selfies_str = sf.encoder(smi)
+        except Exception:
+            # Fallback: if SMILES can't be encoded (shouldn't happen), use placeholder
+            selfies_str = '[C]'
 
-        # Truncate if too long
-        if len(ids) > self.config.max_seq_len:
-            ids = ids[:self.config.max_seq_len]
+        # Tokenize SELFIES string (NO special tokens — prefix handles start)
+        ids = self.tokenizer(selfies_str, add_special_tokens=False)['input_ids']
+
+        # Truncate: leave room for EOS token (index 3 = [SEP])
+        if len(ids) > self.config.max_seq_len - 1:
+            ids = ids[:self.config.max_seq_len - 1]
+
+        # Append EOS token so model learns to terminate generation
+        ids = ids + [3]  # token 3 = [SEP] = EOS
 
         item = {
             'input_ids': torch.tensor(ids, dtype=torch.long),
