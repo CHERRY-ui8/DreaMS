@@ -88,7 +88,8 @@ class SpectraMaccsDataset(Dataset):
         with h5py.File(hdf5_path, 'r') as f:
             split_col = f['split'][:]
             mask = split_col == split_map[split]
-            self.spectra = f['spectrum'][:][mask]           # (N, 2, 60)
+            self.spectra = f['spectrum'][:][mask]              # (N, 2, 60)
+            self.maccs = f['maccs'][:][mask]                   # (N, 167) — precomputed
             self.smiles = [s.decode() if isinstance(s, bytes) else s
                            for s, m in zip(f['smiles'][:], mask) if m]
 
@@ -98,6 +99,7 @@ class SpectraMaccsDataset(Dataset):
             idx = rng.choice(len(self), max_samples, replace=False)
             idx.sort()
             self.spectra = self.spectra[idx]
+            self.maccs = self.maccs[idx]
             self.smiles = [self.smiles[i] for i in idx]
 
         print(f'[Dataset] {split}: {len(self)} spectra')
@@ -119,14 +121,11 @@ class SpectraMaccsDataset(Dataset):
         spec_mask = spec.clone()
         spec_mask[mask] = MASK_VAL
 
-        # MACCS fingerprint
-        maccs = smi_to_maccs(self.smiles[idx])
-
         return {
             'spec_mask': spec_mask,   # (60, 2)
             'spec_real': spec,        # (60, 2)
             'mask': mask,             # (60,)
-            'maccs': maccs,           # (167,)
+            'maccs': torch.from_numpy(self.maccs[idx]).float(),  # (167,) — precomputed
         }
 
 
@@ -174,7 +173,7 @@ def train():
     timestamp = time.strftime('%m%d_%H%M')
     OUTPUT_DIR = f'/root/DreaMS/outputs/dreams_finetune_{timestamp}'
     BATCH_SIZE = 64
-    MAX_EPOCHS = 10
+    MAX_EPOCHS = 100
     LR = 1e-4
     WEIGHT_DECAY = 0.01
     VAL_EVERY = 1        # validate every N epochs
@@ -202,16 +201,19 @@ def train():
     val_ds = SpectraMaccsDataset(HDF5_PATH, split='val', max_samples=MAX_VAL_SAMPLES)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                              collate_fn=collate_fn, num_workers=0)
+                              collate_fn=collate_fn, num_workers=4,
+                              prefetch_factor=2)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                            collate_fn=collate_fn, num_workers=0)
+                            collate_fn=collate_fn, num_workers=4,
+                            prefetch_factor=2)
 
     print(f'  Train: {len(train_ds)} samples ({len(train_loader)} batches)')
     print(f'  Val:   {len(val_ds)} samples ({len(val_loader)} batches)')
 
     # ── Model ──
     encoder = load_dreams(CKPT_PATH, device)
-    model = DreaMS_ChemFinetuner(encoder).to(device)
+    # 'hierarchical' pooling: [CLS] + mean(fragment peaks) → gradient to all 60 positions
+    model = DreaMS_ChemFinetuner(encoder, pooling='hierarchical').to(device)
 
     # DreaMS backbone is unfrozen — gradients flow back to update encoder weights,
     # so the (B, 60, 1024) output embeddings learn chemical semantics from MACCS.

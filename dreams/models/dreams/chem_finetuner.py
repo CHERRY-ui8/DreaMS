@@ -29,24 +29,51 @@ class DreaMS_ChemFinetuner(nn.Module):
         dreams_encoder: Pre-trained DreaMS (pl.LightningModule) instance.
             Must have attributes: d_model, train_objective, dformat, hot_mz_bin_size,
             ff_out, ff_out_intens (if mask_peak_hot), mz_masking_loss.
+        pooling: How to aggregate (B, 60, 1024) → (B, feat_dim) for MACCS head.
+            'cls' —  only [CLS] token (position 0).          feat_dim = 1024
+            'mean' — mean over all 60 positions.              feat_dim = 1024
+            'hierarchical' — [CLS] cat mean(fragment peaks). feat_dim = 2048
     """
 
-    def __init__(self, dreams_encoder: nn.Module):
+    def __init__(self, dreams_encoder: nn.Module, pooling: str = 'cls'):
         super().__init__()
         self.encoder = dreams_encoder
+        self.pooling = pooling
         d_model = self.encoder.d_model  # 1024
 
-        # ── MACCS head: 2-layer MLP on [CLS] token ──
-        # Input:  [CLS] token from sequence_output[:, 0, :]  →  (B, d_model)
-        # Hidden: d_model → d_model  (GELU)
-        # Output: d_model → 167     (MACCS bits, BCEWithLogitsLoss)
+        assert pooling in ('cls', 'mean', 'hierarchical'), \
+            f"pooling must be 'cls', 'mean', or 'hierarchical', got '{pooling}'"
+
+        # Input dimension depends on pooling strategy
+        if pooling == 'hierarchical':
+            in_dim = d_model * 2  # 2048: [CLS] + mean of fragment peaks
+        else:
+            in_dim = d_model      # 1024: [CLS] only or mean of all
+
+        # ── MACCS head: 2-layer MLP ──
         self.maccs_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
+            nn.Linear(in_dim, d_model),
             nn.GELU(),
             nn.Linear(d_model, 167),
         )
 
         self._init_weights()
+
+    def _pool_sequence(self, sequence_output: torch.Tensor) -> torch.Tensor:
+        """Aggregate (B, 60, 1024) → (B, feat_dim) according to self.pooling."""
+        if self.pooling == 'cls':
+            # Only the precursor token (position 0)
+            return sequence_output[:, 0, :]                       # (B, 1024)
+
+        if self.pooling == 'mean':
+            # Uniform average over all 60 peak positions
+            return sequence_output.mean(dim=1)                     # (B, 1024)
+
+        if self.pooling == 'hierarchical':
+            # Precursor token + average of fragment peaks (positions 1..59)
+            cls = sequence_output[:, 0, :]                        # (B, 1024)
+            frag = sequence_output[:, 1:, :].mean(dim=1)          # (B, 1024)
+            return torch.cat([cls, frag], dim=-1)                  # (B, 2048)
 
     def _init_weights(self):
         """Xavier init for MACCS head; keep DreaMS weights unchanged."""
@@ -95,9 +122,10 @@ class DreaMS_ChemFinetuner(nn.Module):
         )
 
         # ── 3. MACCS Classification Loss ──
-        # Extract [CLS] token (first position) for global spectrum representation
-        cls_token = sequence_output[:, 0, :]          # (B, 1024)
-        maccs_logits = self.maccs_head(cls_token)     # (B, 167)
+        # Aggregate (B, 60, 1024) → (B, feat_dim) according to pooling strategy.
+        # Gradient flows to ALL 60 positions, not just [CLS].
+        pooled = self._pool_sequence(sequence_output)  # (B, 1024) or (B, 2048)
+        maccs_logits = self.maccs_head(pooled)          # (B, 167)
         maccs_loss = F.binary_cross_entropy_with_logits(
             maccs_logits, maccs_labels.float()
         )                                             # scalar

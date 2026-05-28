@@ -71,7 +71,7 @@
 3. MACCS 准确率在 Phase 2 中基本饱和（84.4%→84.5%），BCE loss 几乎不变——说明 BCE 梯度已耗尽，需要更强的主干或更多 epoch 才能进一步提升。
 4. 生成方面：Tanimoto 在 epoch 5 达到 0.122 后，epoch 10 反而下降到 0.111——生成质量没有随 loss 下降而改善，暗示解码策略（greedy/beam search）或模型容量有瓶颈。
 
-### 阶段二：架构升级，从 MLP 到 Q-Former (Upgrade to Q-Former)
+### 阶段二：架构升级，从 MLP 到 Q-Former (Upgrade to Q-Former)（已废弃）
 
 目标： 提升特征提取的上限。MLP 只能做简单的线性/非线性映射，处理复杂质谱序列的能力有限。
 - 操作：
@@ -123,6 +123,10 @@
   - Loss = \alpha \cdot Loss_{CE} + \beta \cdot Loss_{BCE}。
   - 目的： Q-Former 参数较多，Phase 1 是它学习质谱特征交叉注意力（Cross-Attention）的关键时期。
 - Phase 2 (适配期): 冻结 T5。训练 LoRA + **微调 Q-Former（小学习率）**。
+- DreaMS 化学微调时 MACCS head 的三种 pooling（`DreaMS_ChemFinetuner`）：
+  - `cls` — 仅取 `[CLS]` token（位置 0），梯度只到第一个 peak
+  - `mean` — 60 个位置平均池化，梯度均匀分布到所有 peak
+  - `hierarchical` — `[CLS]` 拼接碎片峰平均，梯度分别到 precursor 和碎片区域
 ### 阶段三：Prompt 引导生成 (Prompt-Conditioned Generation)
 - 注意：这个阶段 Phase 2 是绝对的主力！
 - Phase 1 (对齐期): 保持阶段二的训练方式，确保分类头能准确输出 MACCS keys。
