@@ -2,10 +2,10 @@
 
 Usage:
     # Phase 1: train projector only (alignment, 3-5 epochs)
-    python -m ms2smiles.train --model_size 19M --phase 1 --max_epochs 5
+    python -m ms2mol_prefix.train --model_size 19M --phase 1 --max_epochs 5
 
     # Phase 2: train projector + LoRA (further tuning, 30 epochs)
-    python -m ms2smiles.train --model_size 19M --phase 2 --max_epochs 30
+    python -m ms2mol_prefix.train --model_size 19M --phase 2 --max_epochs 30
         --resume /path/to/phase1/best.ckpt
 """
 
@@ -25,9 +25,10 @@ from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 import selfies as sf
 
-from ms2smiles.config import MS2SMILESConfig
-from ms2smiles.model import MStoSMILES, inject_lora, count_lora_params
-from ms2smiles.dataset import MSSpectrumSmilesDataset, collate_fn
+from ms2mol_prefix.config import MS2SMILESConfig
+from ms2mol_prefix.model import MStoSMILES
+from ms2mol_shared.lora import inject_lora_gptneo as inject_lora, count_lora_params
+from ms2mol_prefix.dataset import MSSpectrumSmilesDataset, collate_fn
 
 
 def parse_args():
@@ -41,7 +42,7 @@ def parse_args():
     parser.add_argument('--lr_lora', type=float, default=3e-4)
     parser.add_argument('--warmup_steps', type=int, default=500)
     parser.add_argument('--grad_clip', type=float, default=1.0)
-    parser.add_argument('--output_dir', default='/root/DreaMS/ms2smiles/outputs')
+    parser.add_argument('--output_dir', default='/root/DreaMS/ms2mol_prefix/outputs')
 
     # ── Multi-token prefix ──
     parser.add_argument('--k_tokens', type=int, default=4,
@@ -380,7 +381,7 @@ def main():
     # Resume from checkpoint
     if args.resume:
         print(f'Resuming from {args.resume}...')
-        state = torch.load(args.resume, map_location=device)
+        state = torch.load(args.resume, map_location=device, weights_only=False)
         # If resuming, also handle LoRA weights
         missing, unexpected = model.load_state_dict(state['model_state_dict'], strict=False)
         if missing:

@@ -10,9 +10,9 @@ from rdkit import Chem
 from rdkit import DataStructs
 from rdkit.Chem import AllChem
 
-from ms2smiles.config import MS2SMILESConfig
-from ms2smiles.model import MStoSMILES
-from ms2smiles.dataset import MSSpectrumSmilesDataset
+from ms2mol_prefix.config import MS2SMILESConfig
+from ms2mol_prefix.model import MStoSMILES
+from ms2mol_prefix.dataset import MSSpectrumSmilesDataset
 
 
 def tanimoto_similarity(smi1, smi2):
@@ -27,7 +27,7 @@ def tanimoto_similarity(smi1, smi2):
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    ckpt_path = '/root/DreaMS/ms2smiles/outputs/test_run/best.ckpt'
+    ckpt_path = '/root/DreaMS/ms2mol_prefix/outputs/test_run/best.ckpt'
     num_samples = 100
 
     print(f'Device: {device}')
@@ -114,7 +114,7 @@ def main():
         print(f'       gen={gen}  {v}{e}{t}')
 
     # Save
-    output_path = '/root/DreaMS/ms2smiles/outputs/test_run/eval_results.json'
+    output_path = '/root/DreaMS/ms2mol_prefix/outputs/test_run/eval_results.json'
     results = [{'idx': i, 'reference': dataset.smiles[i], 'generated': all_generated[i],
                 'valid': Chem.MolFromSmiles(all_generated[i]) is not None} for i in range(n_test)]
     with open(output_path, 'w') as f:

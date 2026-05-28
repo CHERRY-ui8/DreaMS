@@ -2,11 +2,11 @@
 
 Usage:
     # From precomputed embedding
-    conda run -n dreams python -m ms2smiles.predict --ckpt outputs/best.ckpt \\
+    conda run -n dreams python -m ms2mol_prefix.predict --ckpt outputs/best.ckpt \\
         --embedding_idx 0 --split test
 
     # From raw spectrum (e2e mode)
-    conda run -n dreams python -m ms2smiles.predict --ckpt outputs/best.ckpt \\
+    conda run -n dreams python -m ms2mol_prefix.predict --ckpt outputs/best.ckpt \\
         --spectrum_idx 0 --split test --raw_hdf5 /root/datasets/pairs_ready.hdf5
 """
 
@@ -19,8 +19,8 @@ import h5py
 import numpy as np
 import selfies as sf
 
-from ms2smiles.config import MS2SMILESConfig
-from ms2smiles.model import MStoSMILES
+from ms2mol_prefix.config import MS2SMILESConfig
+from ms2mol_prefix.model import MStoSMILES
 
 
 def parse_args():

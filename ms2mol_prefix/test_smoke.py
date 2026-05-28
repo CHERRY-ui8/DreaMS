@@ -5,9 +5,9 @@ sys.path.insert(0, '/root/DreaMS')
 import torch
 from torch.utils.data import DataLoader
 
-from ms2smiles.config import MS2SMILESConfig
-from ms2smiles.model import MStoSMILES
-from ms2smiles.dataset import MSSpectrumSmilesDataset, collate_fn
+from ms2mol_prefix.config import MS2SMILESConfig
+from ms2mol_prefix.model import MStoSMILES
+from ms2mol_prefix.dataset import MSSpectrumSmilesDataset, collate_fn
 
 
 def freeze_strategy(model, freeze_backbone=True):

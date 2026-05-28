@@ -1,2 +1,23 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Data
+data/
+
 # Training outputs
+outputs/
 ms2smiles/outputs/
+
+# Build artifacts
+*.egg-info/
+dreams.egg-info/
+
+# Model checkpoints
+*.ckpt
+
+# Binaries
+kubectl
+
+# Reports (generated)
+report/
