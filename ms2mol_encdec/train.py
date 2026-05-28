@@ -16,6 +16,12 @@ Usage:
     # Switch backbone (MolT5-small / BioT5-base / BioT5+ base):
     python -m ms2mol_encdec.train --model_name molt5-small --phase 1 --max_epochs 5
     python -m ms2mol_encdec.train --model_name biot5-base --phase 1 --max_epochs 5
+
+    # Full-sequence: 60 peak positions → T5 (bypasses pooled embedding bottleneck)
+    # Requires: extract_embeddings.py with MODE='full' to create full_embedding in HDF5
+    python -m ms2mol_encdec.train --projector_type linear_per_peak --phase 1 --max_epochs 5
+    python -m ms2mol_encdec.train --projector_type linear_per_peak --phase 2 --max_epochs 10 \\
+        --resume /path/to/phase1/best.ckpt
 """
 
 import argparse
@@ -35,7 +41,8 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 from ms2mol_encdec.model import MSToSMILES_T5, info_display, MODEL_REGISTRY
 from ms2mol_encdec.dataset import (
-    MSSpectrumSmilesT5Dataset, NSubsetDataset, SampledSubsetDataset, T5SmilesCollator,
+    MSSpectrumSmilesT5Dataset, MSSpectrumSmilesFullSeqDataset,
+    NSubsetDataset, SampledSubsetDataset, T5SmilesCollator,
 )
 from ms2mol_shared.lora import inject_lora_t5, count_lora_params
 
@@ -50,8 +57,9 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--k_tokens', type=int, default=16)
     parser.add_argument('--projector_type', default='mlp',
-                        choices=['mlp', 'k_heads', 'qformer'],
-                        help='Projector: mlp (default), k_heads (D1), or qformer (learnable queries)')
+                        choices=['mlp', 'k_heads', 'qformer', 'linear_per_peak'],
+                        help='Projector: mlp (default), k_heads (D1), qformer (learnable queries), '
+                             'or linear_per_peak (60 peaks x Linear to d_model)')
     parser.add_argument('--projector_depth', type=int, default=2,
                         help='Depth of projector MLP when projector_type=mlp (2=original)')
     parser.add_argument('--projector_trunk_dim', type=int, default=512,
@@ -187,7 +195,7 @@ def main():
     print(f'Device: {device}')
     print(f'Phase: {args.phase}')
     print(f'Model: {display} (--model_name={args.model_name})')
-    print(f'Architecture: backbone + projector (K={args.k_tokens} prefix tokens)')
+    print(f'Architecture: backbone + projector (K={args.k_tokens if args.projector_type != "linear_per_peak" else 60} prefix tokens)')
     if args.n > 0:
         print(f'Mode: N-sample overfitting (N={args.n}, seed={args.seed})')
     elif args.subset > 0:
@@ -252,7 +260,14 @@ def main():
     print('\n=== Loading datasets ===')
     is_nmode = args.n > 0
     is_subset_mode = args.subset > 0
-    if is_subset_mode:
+
+    # linear_per_peak requires MSSpectrumSmilesFullSeqDataset (full 60x1024 sequence)
+    if args.projector_type == 'linear_per_peak':
+        if is_nmode or is_subset_mode:
+            print('  [linear_per_peak] Subset/N-mode uses full dataset; set --n/subset=0 for full control')
+        train_dataset = MSSpectrumSmilesFullSeqDataset(split='train')
+        val_dataset = MSSpectrumSmilesFullSeqDataset(split='val')
+    elif is_subset_mode:
         train_dataset = SampledSubsetDataset(split='train', n=args.subset, seed=args.seed)
         val_dataset = SampledSubsetDataset(split='val', n=max(2000, args.subset // 20), seed=args.seed)
     elif is_nmode:
@@ -324,6 +339,8 @@ def main():
         arch_tag = f'k{args.k_tokens}_kheads_r{args.projector_head_rank}'
     elif args.projector_type == 'qformer':
         arch_tag = f'q{args.qformer_num_queries}_l{args.qformer_layers}'
+    elif args.projector_type == 'linear_per_peak':
+        arch_tag = 'fullseq_linear'
     else:
         arch_tag = f'k{args.k_tokens}_d{args.projector_depth}'
 

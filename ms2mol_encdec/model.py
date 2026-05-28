@@ -84,6 +84,24 @@ class MaccsHead(nn.Module):
         return self.classifier(pooled)  # (B, 167)
 
 
+class LinearPerPeakProjector(nn.Module):
+    """Per-peak linear projector: (B, 60, 1024) → (B, 60, d_model).
+
+    Each of the 60 peak positions is independently projected to d_model.
+    No information mixing across peaks — the T5 encoder's self-attention
+    handles that. K is fixed at 60 (the number of DreaMS peak tokens).
+    """
+
+    def __init__(self, dreams_dim: int = 1024, d_model: int = 512):
+        super().__init__()
+        self.proj = nn.Linear(dreams_dim, d_model)
+        self.k_tokens = 60  # fixed
+
+    def forward(self, ms_emb: torch.Tensor) -> torch.Tensor:
+        """ms_emb: (B, 60, 1024) → (B, 60, d_model)"""
+        return self.proj(ms_emb)
+
+
 class KHeadsProjector(nn.Module):
     """D1 projector: shared trunk + K independent low-rank heads.
 
@@ -304,8 +322,11 @@ class MSToSMILES_T5(nn.Module):
 
         # 2. MS Projector: dreams_dim -> prefix tokens
         # For Q-Former, num_queries replaces k_tokens as the prefix count
+        # For linear_per_peak, k_tokens is fixed at 60 (the number of DreaMS peak tokens)
         if projector_type == 'qformer':
             self.k_tokens = qformer_num_queries
+        elif projector_type == 'linear_per_peak':
+            self.k_tokens = 60
         self.projector = self._build_projector(dreams_dim)
 
         # 3. Shared embedding (for token-to-embed lookup)
@@ -342,6 +363,9 @@ class MSToSMILES_T5(nn.Module):
             print(f'[MSToSMILES_T5] Projector (qformer): {total_proj:,} params '
                   f'({qformer_num_queries} queries, {qformer_layers} layers, '
                   f'{qformer_heads} heads, 1024->{self.d_model})')
+        elif projector_type == 'linear_per_peak':
+            print(f'[MSToSMILES_T5] Projector (linear_per_peak): {total_proj:,} params '
+                  f'(60 peaks x Linear(1024->{self.d_model}))')
         else:
             print(f'[MSToSMILES_T5] Projector (mlp): {total_proj:,} params '
                   f'({dreams_dim} -> {self.d_model} x {self.k_tokens}, depth={projector_depth}'
@@ -370,6 +394,11 @@ class MSToSMILES_T5(nn.Module):
                 num_layers=self.qformer_layers,
                 num_heads=self.qformer_heads,
                 dropout=0.1,
+            )
+        if self.projector_type == 'linear_per_peak':
+            return LinearPerPeakProjector(
+                dreams_dim=dreams_dim,
+                d_model=self.d_model,
             )
         return self._build_mlp_projector(dreams_dim)
 

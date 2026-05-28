@@ -63,6 +63,58 @@ def smi_to_maccs(smiles: str) -> torch.Tensor:
     return torch.tensor([fp.GetBit(i) for i in range(167)], dtype=torch.float)
 
 
+class MSSpectrumSmilesFullSeqDataset(Dataset):
+    """Dataset of (full MS sequence, SMILES, precomputed MACCS) for T5 training.
+
+    Loads the full (60, 1024) DreaMS peak sequence instead of pooled (1024,).
+    Requires extract_embeddings.py run with MODE='full'.
+    MACCS is loaded from HDF5 (precomputed by precompute_maccs.py).
+    """
+
+    def __init__(
+        self,
+        hdf5_path: str = '/root/datasets/pairs_with_embs.hdf5',
+        split: str = 'train',
+    ):
+        print(f'[Dataset] Loading {split} full (60, 1024) sequence from {hdf5_path}')
+        with h5py.File(hdf5_path, 'r') as f:
+            split_data = f['split'][:]
+            mask = split_data == {'train': 0, 'val': 1, 'test': 2}[split]
+
+            all_embs = f['full_embedding'][:]
+            self.embeddings = all_embs[mask]
+            print(f'  Full embeddings: {self.embeddings.shape}')
+
+            all_smiles = f['smiles'][:]
+            self.smiles = [s.decode() if isinstance(s, bytes) else s
+                           for s, m in zip(all_smiles, mask) if m]
+
+            # Precomputed MACCS (optional, falls back to on-the-fly)
+            if 'maccs' in f:
+                all_maccs = f['maccs'][:]
+                self.maccs = all_maccs[mask]
+                print(f'  Precomputed MACCS: {self.maccs.shape}')
+            else:
+                self.maccs = None
+                print(f'  No precomputed MACCS — will compute on-the-fly')
+
+        print(f'  Spectra: {len(self)}')
+
+    def __len__(self):
+        return len(self.smiles)
+
+    def __getitem__(self, idx):
+        item = {
+            'ms_emb': torch.from_numpy(self.embeddings[idx]).float(),  # (60, 1024)
+            'smiles': self.smiles[idx],
+        }
+        if self.maccs is not None:
+            item['maccs'] = torch.from_numpy(self.maccs[idx]).float()
+        else:
+            item['maccs'] = smi_to_maccs(self.smiles[idx])
+        return item
+
+
 class NSubsetDataset(Dataset):
     """Load N random samples from the HDF5 training split for overfitting tests."""
 

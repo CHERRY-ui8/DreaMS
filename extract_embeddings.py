@@ -48,6 +48,11 @@ HDF5_OUT = Path('/root/datasets/pairs_with_embs.hdf5')
 CKPT = 'dreams/models/pretrained/ssl_model.ckpt'
 BATCH_SIZE = 256
 
+# ─── Output mode ─────────────────────────────────
+# 'pooled' — (B, 1024)  [CLS] token only  (original behavior)
+# 'full'   — (B, 60, 1024)  all peak positions
+MODE = 'full'
+
 # ─── Load DreaMS ─────────────────────────────────
 print('Loading DreaMS backbone...')
 raw = torch.load(CKPT, map_location='cpu', weights_only=False)
@@ -86,25 +91,32 @@ n_total = len(spectra)
 print(f'Spectra to process: {n_total}')
 
 # ─── Extract embeddings ─────────────────────────
-print('Extracting embeddings...')
-embeddings = np.zeros((n_total, 1024), dtype='float32')
+print(f'Mode: {MODE} ({"(60, 1024) full sequence" if MODE == "full" else "(1024,) pooled [CLS]"})')
+if MODE == 'full':
+    embeddings = np.zeros((n_total, 60, 1024), dtype='float32')
+else:
+    embeddings = np.zeros((n_total, 1024), dtype='float32')
 
 with torch.no_grad():
     for start in tqdm(range(0, n_total, BATCH_SIZE), desc='Embedding'):
         end = min(start + BATCH_SIZE, n_total)
         batch_spectra = spectra[start:end]
-        
+
         # Convert to tensor: (B, 2, 60) -> (B, 60, 2) where last dim is [mz, intensity]
         peaks = torch.from_numpy(batch_spectra).float().to(device)
         peaks = peaks.permute(0, 2, 1)  # (B, 60, 2)
-        
+
         # DreaMS forward — it applies SpectrumPreprocessor internally
         embs = model(peaks, charge=None)
-        
-        if embs.dim() == 3:
-            embs = embs[:, 0, :]  # (B, 1024)
-        
-        embeddings[start:end] = embs.cpu().numpy()
+
+        if MODE == 'full':
+            # Save all 60 positions: (B, 60, 1024)
+            embeddings[start:end] = embs.cpu().numpy()
+        else:
+            # Original behavior: only [CLS] token
+            if embs.dim() == 3:
+                embs = embs[:, 0, :]  # (B, 1024)
+            embeddings[start:end] = embs.cpu().numpy()
 
 print(f'Embeddings shape: {embeddings.shape}')
 print(f'Embedding range: [{embeddings.min():.3f}, {embeddings.max():.3f}]')
@@ -112,15 +124,26 @@ print(f'Embedding range: [{embeddings.min():.3f}, {embeddings.max():.3f}]')
 # ─── Write output ─────────────────────────────────
 print(f'Writing {HDF5_OUT}...')
 with h5py.File(HDF5_OUT, 'w') as f:
-    f.create_dataset('embedding', data=embeddings, dtype='float32',
+    if MODE == 'full':
+        dataset_name = 'full_embedding'
+    else:
+        dataset_name = 'embedding'
+    f.create_dataset(dataset_name, data=embeddings, dtype='float32',
                      compression='gzip', compression_opts=6)
+
+    # Always save pooled embedding too for backward compatibility
+    if MODE == 'full':
+        pooled = embeddings[:, 0, :]  # (N, 1024) — [CLS] token
+        f.create_dataset('embedding', data=pooled, dtype='float32',
+                         compression='gzip', compression_opts=6)
+
     f.create_dataset('smiles', data=smiles, dtype=h5py.string_dtype())
     f.create_dataset('split', data=split, dtype='int8')
     f.create_dataset('adduct', data=adduct, dtype=h5py.string_dtype())
     f.create_dataset('collision_energy', data=ce, dtype='int16')
     f.create_dataset('charge', data=charge, dtype='int8')
     f.create_dataset('precursor_mz', data=pmz, dtype='float32')
-    
+
     # Copy attrs
     with h5py.File(HDF5_IN, 'r') as fin:
         for k, v in fin.attrs.items():
@@ -128,6 +151,7 @@ with h5py.File(HDF5_OUT, 'w') as f:
 
 size_mb = os.path.getsize(HDF5_OUT) / 1e6
 print(f'Done! {HDF5_OUT} ({size_mb:.0f} MB)')
-print(f'  Spectra: {n_total}')
-print(f'  Embedding: {embeddings.shape[1]}d')
+emb_name = 'full_embedding' if MODE == 'full' else 'embedding'
+print(f'  Dataset: {emb_name} {embeddings.shape}')
+print(f'  Backward compat: embedding (1024,) also saved' if MODE == 'full' else '')
 print(f'  Memory: {embeddings.nbytes / 1e6:.0f} MB (float32)')
