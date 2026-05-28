@@ -71,7 +71,55 @@
 3. MACCS 准确率在 Phase 2 中基本饱和（84.4%→84.5%），BCE loss 几乎不变——说明 BCE 梯度已耗尽，需要更强的主干或更多 epoch 才能进一步提升。
 4. 生成方面：Tanimoto 在 epoch 5 达到 0.122 后，epoch 10 反而下降到 0.111——生成质量没有随 loss 下降而改善，暗示解码策略（greedy/beam search）或模型容量有瓶颈。
 
-### 阶段二：架构升级，从 MLP 到 Q-Former (Upgrade to Q-Former)（已废弃）
+### 诊断与决策 2026-05-28
+
+#### K=128 投影器容量实验
+
+在 40k 分子子集上验证"增大 Projector 容量是否能突破 exact match = 0%"：
+
+| 配置 | K tokens | Tanimoto | Exact Match | 结论 |
+|------|----------|----------|-------------|------|
+| MLP d=2, K=128, pooled 1024-d | 128 | **0.16** | **0.00%** | 72M 参数也无法恢复 pooling 丢掉的信息 |
+
+**根因确认**：瓶颈不在 Projector 容量，而在 `DreaMS → (60,1024) → [CLS]pool → (1024,)` 这一步。60 个峰位 × 1024-d = 61,440 个数压缩到 1024 是不可逆的。即使 K=128（最后一层 1024→65536），Projector 也只能记住训练集分布，无法在 unseen 分子上泛化。
+
+#### 架构决策：全序列直通 T5 (LinearPerPeak)
+
+因果链：pooling 丢信息 → 增大 K 只能记忆 → 根本解是不 pooling
+
+**方案**：用 `Linear(1024→d_model)` 独立投影每个峰位，60 个 token 直接喂给 T5 encoder：
+
+```
+旧: DreaMS → (60,1024) → [CLS] → (1024,) → Projector → (K,d_model) → T5
+新: DreaMS → (60,1024) → Linear(1024→d_model) 每峰 → (60,d_model) → T5
+```
+
+- 参数量：~787K（T5-base），仅为原 MLP Projector 的 ~1%
+- 60 个 token 对 T5 encoder 计算量很小
+- T5 的 self-attention 自动学习峰间关系
+
+**实现**（commit `35259bc`）：
+- `extract_embeddings.py`: `MODE='full'` 保存 `full_embedding` (N, 60, 1024)
+- `ms2mol_encdec/model.py`: `LinearPerPeakProjector`，`--projector_type linear_per_peak`
+- `ms2mol_encdec/dataset.py`: `MSSpectrumSmilesFullSeqDataset` 加载全序列
+- `ms2mol_encdec/train.py`: 全流程支持
+
+#### DreaMS 化学微调改进
+
+同期改进了 `train_chem_finetuner.py` 的设计（与架构改造并行）：
+
+| 改动 | 之前 | 之后 |
+|------|------|------|
+| MACCS 池化 | 仅 `[CLS]` token → 梯度只到 position 0 | `hierarchical`: `[CLS] + mean(碎片峰)` → 梯度到全部 60 个位置 |
+| MACCS 计算 | 每个 epoch 在线跑 RDKit | `precompute_maccs.py` 预存到 HDF5 |
+| DataLoader | `num_workers=0` | `num_workers=4, prefetch_factor=2` |
+| 训练轮数 | MAX_EPOCHS=10 | MAX_EPOCHS=100 |
+
+#### 未解决问题（后续迭代）
+
+1. **MACCS 天花板 84.5%** — 标准 `BCEWithLogitsLoss` 未做正负样本平衡（167 位中大多为 0），模型偏向全 0。后续可用 ASL (Asymmetric Loss) 或 `pos_weight`
+2. **Q-Former 接入全序列** — LinearPerPeak 是第一步，后续可将 `LinearPerPeakProjector` 替换为全序列 Q-Former（queries cross-attend 到 60 个 vision tokens）
+3. **端到端训练** — 当前 DreaMS 微调和 T5 训练是分离的。Phase 2 可将 DreaMS LoRA + T5 LoRA + Projector 联合训练，让 SMILES 梯度回流到 MS encoder
 
 目标： 提升特征提取的上限。MLP 只能做简单的线性/非线性映射，处理复杂质谱序列的能力有限。
 - 操作：
@@ -82,12 +130,36 @@
 - 验收标准： 在 460k 数据上，对比阶段一，MACCS 分类准确率和 SMILES 生成的 BLEU/准确率应该有显著的跃升。
 
 ### 阶段二：架构升级 (Unlock MS Sequence + Q-Former) —— 重大修改！
+
+#### Step 1 (已完成): LinearPerPeak — 全序列直通 T5
+用 `Linear(1024→d_model)` 独立投影每个峰位，60 个 token 直接喂给 T5 encoder：
+```
+DreaMS → (60,1024) → Linear(1024→d_model) 每峰 → (60,d_model) → T5
+```
+参数量极小（~0.8M），T5 self-attention 自动学习峰间关系。
+- 实现: `ms2mol_encdec/model.py` `LinearPerPeakProjector`, `--projector_type linear_per_peak`
+- HDF5 数据: `extract_embeddings.py` `MODE='full'` 产出 `full_embedding` (N, 60, 1024)
+
+#### Step 2 (后续): Q-Former 替换 LinearPerPeak
+在 Step 1 基础上，将 `LinearPerPeakProjector` 替换为全序列 Q-Former：
+```
+DreaMS → (60,1024) → Linear(1024→d_model) → (60,d_model) → Q-Former(32 queries) → (32,d_model) → T5
+```
+
 原计划： 仅仅把 MLP 换成 Q-Former。
 新计划： “释放序列特征” + Q-Former。
 - 操作：
   - 修改 MS Encoder： 找到 MS Encoder 的代码，去掉最后的 Pooling 层（或 CLS token 提取），让它输出完整的质谱峰序列特征 (B, L, 1024)。
   - 接入 Q-Former： 让 Q-Former 的 32 个 Queries 去 Cross-Attend 这个 (B, L, 1024) 的序列。
-为什么必须改： 这是从根本上解决 400k 数据泛化失败的钥匙。只有拿到序列，Q-Former 才能真正发挥“对齐”的作用，而不是在单向量上“瞎猜”。
+为什么必须改： 这是从根本上解决 400k 数据泛化失败的钥匙。只有拿到序列，Q-Former 才能真正发挥”对齐”的作用，而不是在单向量上”瞎猜”。
+
+#### 架构演进路线
+```
+MLP(K tokens on pooled 1024)          ← 阶段一：K=16, exact=0%, tanimoto=0.12
+  → LinearPerPeak(60 tokens on seq)   ← 当前：直接保留 60 峰信息
+    → Q-Former(K queries on seq)      ← 下一步：可学习的 cross-attention 压缩
+      → E2E (DreaMS LoRA + T5 LoRA)   ← 远期：梯度端到端回流
+```
 
 ### 阶段三：Prompt 引导生成 (Prompt-Conditioned Generation)
 
