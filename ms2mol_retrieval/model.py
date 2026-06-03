@@ -316,3 +316,106 @@ class MSMolCLIPMultiTask(MSMolCLIP):
             'maccs_logits': self.proj_maccs(ms_emb),
             'mol_weight': self.proj_mol_weight(ms_emb),
         }
+
+
+class MSMolCLIPSharedTrunk(MSMolCLIP):
+    """MSMolCLIPMultiTask with a shared trunk before task heads.
+
+    Architecture:
+        ms_emb (1024) ──→ SharedTrunk ──→ shared_feat (512) ──┬──→ CrossHead → 512-d L2Norm → InfoNCE
+                                                               ├──→ MACCSHead → 166 → BCE
+                                                               └──→ MWHead     → 1   → Huber
+        mol_emb (768) ──→ MoL Projector (unchanged) ──→ 512-d L2Norm ──────────────────────┘
+
+    The shared trunk receives gradients from all three tasks, enabling MACCS/MW
+    supervision to influence the cross-modal retrieval projection.
+
+    Args:
+        ms_dim: DreaMS embedding dimension (default: 1024).
+        mol_dim: MoLFormer embedding dimension (default: 768).
+        proj_dim: Shared projection dimension (default: 512).
+        proj_hidden: Projector hidden layer width (default: 1024).
+        proj_depth: Projector depth 2 or 3 (default: 2).
+        trunk_dim: Shared trunk output dimension (default: 512).
+        dropout: Dropout rate (default: 0.1).
+    """
+
+    def __init__(
+        self,
+        ms_dim: int = 1024,
+        mol_dim: int = 768,
+        proj_dim: int = 512,
+        proj_hidden: int = 1024,
+        proj_depth: int = 2,
+        trunk_dim: int = 512,
+        dropout: float = 0.1,
+    ):
+        # Call MSMolCLIP's __init__ (NOT MSMolCLIPMultiTask) to set up
+        # ms_projector, mol_projector, logit_scale
+        super().__init__(ms_dim, mol_dim, proj_dim, proj_hidden, proj_depth)
+
+        # ── Shared trunk: ms_emb (1024) → trunk_dim ──
+        self.shared_trunk = nn.Sequential(
+            nn.Linear(ms_dim, trunk_dim),
+            nn.LayerNorm(trunk_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+        # ── Cross-modal head: trunk_dim → proj_dim (L2-normed for InfoNCE) ──
+        # This replaces ms_projector's role for retrieval
+        self.cross_head = nn.Sequential(
+            nn.Linear(trunk_dim, proj_hidden),
+            nn.GELU(),
+            nn.LayerNorm(proj_hidden),
+            nn.Dropout(dropout),
+            nn.Linear(proj_hidden, proj_dim),
+        )
+
+        # ── MACCS head: trunk_dim → 256 → 166 ──
+        self.proj_maccs = nn.Sequential(
+            nn.Linear(trunk_dim, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 166),
+        )
+
+        # ── MW head: trunk_dim → 64 → 1 ──
+        self.proj_mol_weight = nn.Sequential(
+            nn.Linear(trunk_dim, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+        )
+
+        n_total = sum(p.numel() for p in self.parameters())
+        n_train = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f'[MSMolCLIPSharedTrunk] Total params: {n_total:,} (trainable: {n_train:,})')
+        print(f'[MSMolCLIPSharedTrunk] Trunk: {ms_dim} → {trunk_dim} → {proj_dim} | '
+              f'MACCS: {trunk_dim}→256→166 | MW: {trunk_dim}→64→1')
+
+    def forward(
+        self, ms_emb: torch.Tensor, mol_emb: torch.Tensor
+    ) -> dict:
+        """Forward pass.
+
+        Returns:
+            dict with 'ms_feat', 'mol_feat', 'maccs_logits', 'mol_weight'.
+        """
+        # Shared trunk: all three heads receive the same shared representation
+        shared = self.shared_trunk(ms_emb)
+
+        # Cross-modal (InfoNCE)
+        ms_feat = F.normalize(self.cross_head(shared), dim=-1)
+
+        # Molecule side: unchanged
+        mol_feat = self.encode_mol(mol_emb)
+
+        return {
+            'ms_feat': ms_feat,
+            'mol_feat': mol_feat,
+            'maccs_logits': self.proj_maccs(shared),
+            'mol_weight': self.proj_mol_weight(shared),
+        }

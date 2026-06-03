@@ -162,11 +162,14 @@ Phase 2 (ep switch_epoch+1+):  hard_ratio_phase2 → 结构相似负样本，死
 
 ## 下一步
 
-1. **控制实验：纯 CLIP deep3 用 grad_clip=5.0** 验证 11.15% 的提升是否来自 grad_clip 差异。
-2. **Phase 3.2：解冻 backbone**。需先解决 `pairs_with_embs.hdf5` 与 `dreams_ready.hdf5` 的 SMILES canonicalization 对齐，使端到端训练成为可能。
-3. **梯度范数诊断**。在冻结 backbone 下，测量各 loss 在 backbone 输出端的梯度 2-norm，据此精确调整损失权重。
-4. **数据增强**。MS 谱图 m/z 偏移 + 强度扰动，延缓过拟合。
-5. **更换分子编码器**。MolT5 / BioT5 / ChemBERTa-2，替代 2022 年的 MoLFormer。
+1. ✅ ~~实验对比~~ — 已完成冻结 backbone 多任务 vs 纯 CLIP 基线分析
+2. **共享 trunk 多任务** — 实现 `ms_emb→共享MLP→3 heads` 架构。改动最小、复用现有缓存 embedding，验证信息是否在表征中但未被共享利用。
+   - 如果 retrieval 涨了 → 问题解决，信息在表征里但之前没被用上
+   - 如果涨不动 → 信号指向「池化瓶颈丢了信息」，下一步上解冻后几层 + full-sequence 输入
+3. **Phase 3.2：解冻 backbone**。需先解决 `pairs_with_embs.hdf5` 与 `dreams_ready.hdf5` 的 SMILES canonicalization 对齐。
+4. **梯度范数诊断**。测量各 loss 在 backbone 输出端的梯度 2-norm，据此精确调整损失权重。
+5. **数据增强**。MS 谱图 m/z 偏移 + 强度扰动，延缓过拟合。
+6. **更换分子编码器**。MolT5 / BioT5 / ChemBERTa-2，替代 2022 年的 MoLFormer。
 
 ## 当前架构（CLIP 风格 512-d 共享空间 + 2 辅助头）
 
@@ -212,7 +215,43 @@ InfoNCE 在 **512-d 共享空间**中计算，与纯 CLIP 架构一致。
 
 **注意**：修改记录见 [git commit `w_maccs 10→2`](#)。
 
-### 训练计划
+### 共享 Trunk 架构（`MSMolCLIPSharedTrunk`）🆕
+
+```
+ms_emb (1024-d) ──→ SharedTrunk(1024→512) ──→ shared_feat (512-d) ──┬──→ CrossHead(512→512) → L2Norm → InfoNCE
+                                                                     ├──→ MACCSHead(512→256→166) → BCE
+                                                                     └──→ MWHead(512→64→1) → Huber
+mol_emb (768-d) ──→ MoL Projector (不变) ──→ L2Norm ──→ 512-d ─────────────────────────────────┘
+```
+
+**与 `MSMolCLIPMultiTask` 的区别**：三个 head 从同一个 **共享的 512-d 特征**出发，而不是各自从 raw 1024-d 出发。共享 trunk 接收所有三个任务的梯度，因此 MACCS/MW 可以影响 InfoNCE 的投影空间。
+
+**实验逻辑**（先便宜后贵）：
+1. **共享 trunk**（当前）— 改动最小、复用缓存 embedding。如果 retrieval 涨了 → 信息在表征里但之前没被共享用上
+2. **解冻 backbone**（后续）— 如果共享 trunk 涨不动 → 指向「池化瓶颈丢了信息」，再上解冻后几层 + full-sequence 输入
+
+| 组件 | 结构 | 参数量 |
+|------|------|--------|
+| SharedTrunk | Linear(1024, 512) → LN → GELU → Dropout | ~0.53M |
+| CrossHead (替代 ms_projector) | Linear(512, 1024) → GELU → LN → Dropout → Linear(1024, 512) | ~1.05M |
+| MoL Projector (不变) | 768→1024→GELU→LN→512 | ~2.36M |
+| MACCS Head | Linear(512, 256) → LN → GELU → Dropout → Linear(256, 166) | ~0.17M |
+| MW Head | Linear(512, 64) → LN → GELU → Dropout → Linear(64, 1) | ~0.03M |
+| **共享 trunk 总计** | | **~6.78M**（含未使用的原 ms_projector ~2.63M） |
+| 相对于 MSMolCLIPMultiTask（~5.37M） | | **+~1.41M**（新增 trunk + cross_head - 原 head ） |
+
+**启动命令**：
+```bash
+# 冒烟测试（40k 子集, 5 epoch）
+python -m ms2mol_retrieval.train_multitask \
+    --use_shared_trunk \
+    --subset 40000 --max_epochs 5 --batch_size 256
+
+# 完整训练（50 epoch, bs8192, depth=3)
+python -m ms2mol_retrieval.train_multitask \
+    --use_shared_trunk \
+    --batch_size 8192 --max_epochs 50 --proj_depth 3
+```
 
 **Phase 1** ✅ 已完成 — 代码冒烟测试 + 单 Batch 过拟合验证
 - 2026-06-03: Phase 1.1 Dummy 测试通过，Phase 1.2 真实数据过拟合通过

@@ -14,6 +14,14 @@ Usage:
     # Full training (50 epochs, bs8192)
     python -m ms2mol_retrieval.train_multitask \\
         --batch_size 8192 --max_epochs 50 --proj_depth 3
+
+    # Shared trunk mode (40k subset, 5 epochs)
+    python -m ms2mol_retrieval.train_multitask \\
+        --use_shared_trunk --subset 40000 --max_epochs 5 --batch_size 256
+
+    # Shared trunk full training
+    python -m ms2mol_retrieval.train_multitask \\
+        --use_shared_trunk --batch_size 8192 --max_epochs 50 --proj_depth 3
 """
 
 import argparse
@@ -29,7 +37,7 @@ from torch.utils.data import DataLoader, Subset
 
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
-from ms2mol_retrieval.model import MSMolCLIPMultiTask
+from ms2mol_retrieval.model import MSMolCLIPMultiTask, MSMolCLIPSharedTrunk
 from ms2mol_retrieval.dataset import MultiTaskRetrievalDataset
 
 
@@ -47,6 +55,10 @@ def parse_args():
     parser.add_argument('--proj_hidden', type=int, default=1024)
     parser.add_argument('--proj_depth', type=int, default=2, choices=[2, 3])
     parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--use_shared_trunk', action='store_true',
+                        help='Use MSMolCLIPSharedTrunk (shared MLP before 3 heads)')
+    parser.add_argument('--trunk_dim', type=int, default=512,
+                        help='Shared trunk output dimension (only for --use_shared_trunk)')
 
     # Training
     parser.add_argument('--batch_size', type=int, default=256)
@@ -199,7 +211,7 @@ def main():
 
     # ── Output ──
     timestamp = time.strftime('%m%d_%H%M')
-    run_name = args.run_name or f'mt_d{args.proj_dim}_b{args.batch_size}'
+    run_name = args.run_name or f'{"st_" if args.use_shared_trunk else "mt_"}{args.proj_dim}d_b{args.batch_size}'
     output_dir = os.path.join(args.output_dir, f'{run_name}_{timestamp}')
     os.makedirs(output_dir, exist_ok=True)
 
@@ -235,10 +247,17 @@ def main():
 
     # ── Model ──
     print('\n=== Building model ===')
-    model = MSMolCLIPMultiTask(
+    if args.use_shared_trunk:
+        ModelClass = MSMolCLIPSharedTrunk
+        print(f'[Model] Shared trunk: ms_emb → {args.trunk_dim}d trunk → 3 heads')
+    else:
+        ModelClass = MSMolCLIPMultiTask
+        print(f'[Model] Separate heads from raw 1024-d ms_emb')
+    model = ModelClass(
         ms_dim=1024, mol_dim=768,
         proj_dim=args.proj_dim, proj_hidden=args.proj_hidden,
         proj_depth=args.proj_depth, dropout=args.dropout,
+        **{'trunk_dim': args.trunk_dim} if args.use_shared_trunk else {},
     ).to(device)
 
     if args.resume:
