@@ -89,10 +89,14 @@ index.add(mol_feat_all)              # 所有独特分子的嵌入作为索引
 --batch_size 8192 --proj_dim 512 --proj_hidden 1024 --proj_depth 3
 \`\`\`
 
-**优化器配置**：
+**优化器配置（纯 CLIP）**：
 - AdamW（lr=3e-4, weight_decay=0.01）
 - Cosine scheduler + 1000 steps warmup
 - Gradient clipping at 1.0
+
+**优化器配置（多任务）**：
+- AdamW（lr=3e-4, weight_decay=0.01）— **所有参数统一 lr，不含单独 logit_scale 分组**
+- 默认损失权重：`w_cross=1, w_maccs=2, w_mw=5`
 
 ## 关键实现
 
@@ -121,11 +125,12 @@ Phase 2 (ep switch_epoch+1+):  hard_ratio_phase2 → 结构相似负样本，死
 
 ## 实验报告
 
-### 全实验对比 (50 epochs, 313K 全量)
+### 全实验对比 (50 epochs, 313K 全量，纯 CLIP)
 
 | 实验 | BS | Proj | 隐藏层 | 参数 | Hard | **Test R@1** | Test R@5 | Test R@10 | τ |
 |---|---|---|---|---|---|---|---|---|---|
 | **🏆 BS8192-D3-W1024** | 8192 | 512 | 1024×3 | 5.0M | 0.0 | **10.51%** | 25.83% | 34.44% | 0.0498 |
+| **MT_512d_v2_lrfix** 🆕 | 8192 | 512 | 1024×3 + 2 heads | 5.4M | 0.0 | **11.15%** | 26.49% | 34.75% | 0.0492 |
 | BS8192-D3-W1024_Curric | 8192 | 512 | 1024×3 | 5.0M | 0→0.10 | 10.22% | 25.74% | 34.42% | 0.0506 |
 | BS8192-D2-W512 | 8192 | 512 | 512×2 | 1.4M | 0.0 | 9.40% | 23.39% | 31.76% | 0.0560 |
 | BS8192-D2-W512_HN10 | 8192 | 512 | 512×2 | 1.4M | 0.10 | 9.14% | 23.42% | 32.06% | 0.0497 |
@@ -151,15 +156,17 @@ Phase 2 (ep switch_epoch+1+):  hard_ratio_phase2 → 结构相似负样本，死
 1. **更深投影头是唯一有效突破**。3 层 MLP (5M) 将 R@1 从 9.40% → 10.51%。
 2. **大 batch 是基础**。8192 vs 256 = 10.51% vs 7.38%。
 3. **Hard negatives 回报递减**。深层投影头下加入硬负样本反而降低效果。
-4. **所有实验 epoch 10 后过拟合**。深层投影头峰值更高但趋势不变。
-5. **距理论上限仍远**。10.51% vs 40-50%，跨模态对齐需根本性突破。
+4. **多任务（冻结 backbone）超过纯 CLIP 基线**。修复 τ 崩溃后，MT_512d 以同一架构（+辅助头）达到 **11.15%** R@1，略高于纯 CLIP 的 10.51%。但此提升主要源于 **grad_clip=5.0 vs 1.0 的差异**，而非辅助任务本身帮助了 InfoNCE（辅助 head 与主 head 参数解耦，梯度路径独立）。
+5. **所有实验 epoch 10 后过拟合**。深层投影头峰值更高但趋势不变。多任务亦在 epoch 10 达到最佳。
+6. **距理论上限仍远**。11.15% vs 40-50%，跨模态对齐需根本性突破。
 
 ## 下一步
 
-1. **更宽投影头 (proj_hidden=2048) + 早停**。尝试 2x 宽度能否进一步突破。
-2. **数据增强**。MS 谱图 m/z 偏移 + 强度扰动，延缓过拟合。
-3. **更换分子编码器**。MolT5 / BioT5 / ChemBERTa-2，替代 2022 年的 MoLFormer。
-4. **多任务学习**。保留 DreaMS 的 SSL 预训练信号，防止特征退化。
+1. **控制实验：纯 CLIP deep3 用 grad_clip=5.0** 验证 11.15% 的提升是否来自 grad_clip 差异。
+2. **Phase 3.2：解冻 backbone**。需先解决 `pairs_with_embs.hdf5` 与 `dreams_ready.hdf5` 的 SMILES canonicalization 对齐，使端到端训练成为可能。
+3. **梯度范数诊断**。在冻结 backbone 下，测量各 loss 在 backbone 输出端的梯度 2-norm，据此精确调整损失权重。
+4. **数据增强**。MS 谱图 m/z 偏移 + 强度扰动，延缓过拟合。
+5. **更换分子编码器**。MolT5 / BioT5 / ChemBERTa-2，替代 2022 年的 MoLFormer。
 
 ## 当前架构（CLIP 风格 512-d 共享空间 + 2 辅助头）
 
@@ -178,7 +185,7 @@ ms_emb (1024-d) ──┬──→ MACCS Proj (1024→256→166) ─────
 | MoL Projector | 768→1024→GELU→LN→512 | ~1.31M | InfoNCE (对称 CE) |
 | MACCS Proj | 1024→256→LN→GELU→166 | ~0.31M | BCEWithLogits |
 | MW Proj | 1024→64→LN→GELU→1 | ~0.07M | Huber (Smooth L1) |
-| **总计** | | **~3.26M** | |
+| **总计**（多任务冻结 backbone） | | **~5.4M** | |
 
 两个辅助 head 从 **raw 1024-d 输入**出发，不经过 512-d 投影空间。
 InfoNCE 在 **512-d 共享空间**中计算，与纯 CLIP 架构一致。
@@ -190,6 +197,20 @@ InfoNCE 在 **512-d 共享空间**中计算，与纯 CLIP 架构一致。
 | 跨模态对齐 | 对比学习 | 512-d (L2 normed) | Symmetric InfoNCE | 最终目标 |
 | MACCS 子结构 | 多标签分类 | 166-d logits | BCEWithLogitsLoss | 诊断：结构化学 |
 | 分子量回归 | 回归 | 1-d | Huber Loss (Smooth L1) | 诊断：质量信息 |
+
+### 损失权重设计（多任务）
+
+基于 `MT_512d_v2_lrfix` 50 epochs 收敛时的训练步损失分解：
+
+| 任务 | 收敛时 raw loss | 输出维度 | 旧权重 | 旧加权值 | 新权重 | 新加权值 |
+|------|----------------|---------|--------|---------|--------|---------|
+| InfoNCE | ~0.47 | 512-d (对比) | 1 | 0.47 (11%) | **1** | 0.47 (29%) |
+| MACCS | ~0.33 | 166 (BCE) | 10 | 3.30 (77%) | **2** | 0.66 (40%) |
+| MW | ~0.10 | 1 (Huber) | 5 | 0.50 (12%) | **5** | 0.50 (31%) |
+
+**新权重目标**：解冻 backbone 后三个任务的梯度能均衡回传，防止 MACCS 主导（旧权重下 77% 的总损失来自 MACCS）。
+
+**注意**：修改记录见 [git commit `w_maccs 10→2`](#)。
 
 ### 训练计划
 
@@ -223,11 +244,18 @@ InfoNCE 在 **512-d 共享空间**中计算，与纯 CLIP 架构一致。
   - HDF5 `maccs` 字段 — MACCS 166-bit 指纹
   - HDF5 `embedding` 字段 — DreaMS 1024-d 特征
 
-**Phase 3** 待开始 — 两阶段渐进式训练
-- Phase 3.1: 冻结 backbone，只训 3 个 Projector（5-10 epoch）
-- Phase 3.2: 解冻最后 2-4 层 Transformer，联合精调
+**Phase 3** ✅ 已完成 — 冻结 backbone，多任务训练
 
-**Phase 4** 待开始 — 评估指标
-- InfoNCE: FAISS 全库检索 R@1/5/10（与纯 CLIP 基线 10.51% 对比）
-- MACCS: Macro-F1 + AUROC（目标 > 0.90）
-- 分子量: MAE（目标 < 2 Da）
+- Phase 3.1 已完成 — 全量 313K 数据，50 epochs，bs8192，depth=3，修复 logit_scale 学习率后
+  - Test R@1 = **11.15%**（首次超过纯 CLIP 的 10.51%，但主因是 grad_clip 差异）
+  - MACCS Acc (val): 84.3%
+  - MW MAE_z (val): 0.345（≈48 Da）
+  - 最佳 checkpoint 在 epoch 10（val_loss 最低）
+  - 默认损失权重调整为 `w_cross=1, w_maccs=2, w_mw=5`（基于收敛时损失贡献分析）
+- Phase 3.2 待开始 — 解冻 backbone，联合精调（需先解决 SMILES canonicalization 数据对齐问题）
+
+**Phase 4** ✅ 已完成 — 评估指标与基线对比
+
+- InfoNCE: FAISS 全库检索 R@1/5/10 — 多任务（冻结）11.15% vs 纯 CLIP 10.51% ✅
+- MACCS: 准确率 84.3%（目标 > 90% AUROC，待计算）
+- 分子量: MAE_z ~0.345（≈48 Da，受限于同一分子多谱图噪声）

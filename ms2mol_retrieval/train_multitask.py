@@ -60,7 +60,7 @@ def parse_args():
     # Loss weights
     parser.add_argument('--w_cross', type=float, default=1.0,
                         help='InfoNCE loss weight')
-    parser.add_argument('--w_maccs', type=float, default=10.0,
+    parser.add_argument('--w_maccs', type=float, default=2.0,
                         help='MACCS BCE loss weight')
     parser.add_argument('--w_mw', type=float, default=5.0,
                         help='Molecular weight Huber loss weight')
@@ -246,12 +246,10 @@ def main():
         model.load_state_dict(state['model_state_dict'])
         print(f'Resumed from {args.resume} (epoch {state.get("epoch", "?")})')
 
-    # ── Optimizer ──
-    optimizer = torch.optim.AdamW([
-        {'params': [p for n, p in model.named_parameters() if 'logit_scale' not in n],
-         'lr': args.lr, 'weight_decay': args.weight_decay},
-        {'params': [model.logit_scale], 'lr': args.lr_logit, 'weight_decay': 0.0},
-    ])
+    # ── Optimizer (纯 CLIP 风格：所有参数统一 lr，不含单独 logit_scale 分组) ──
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+    )
 
     total_steps = len(train_loader) * args.max_epochs
     warmup_steps = min(args.warmup_steps, total_steps // 10)
