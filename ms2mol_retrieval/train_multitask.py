@@ -230,8 +230,10 @@ def main():
     # ── Data ──
     print('\n=== Loading data ===')
     train_dataset = MultiTaskRetrievalDataset(hdf5_path=args.hdf5_path, split='train', cache_dir=args.cache_dir)
-    val_dataset = MultiTaskRetrievalDataset(hdf5_path=args.hdf5_path, split='val', cache_dir=args.cache_dir)
-    test_dataset = MultiTaskRetrievalDataset(hdf5_path=args.hdf5_path, split='test', cache_dir=args.cache_dir)
+    val_dataset = MultiTaskRetrievalDataset(hdf5_path=args.hdf5_path, split='val', cache_dir=args.cache_dir,
+                                            mw_mean=train_dataset.mw_mean, mw_std=train_dataset.mw_std)
+    test_dataset = MultiTaskRetrievalDataset(hdf5_path=args.hdf5_path, split='test', cache_dir=args.cache_dir,
+                                             mw_mean=train_dataset.mw_mean, mw_std=train_dataset.mw_std)
 
     if args.subset:
         train_dataset = Subset(train_dataset, range(min(args.subset, len(train_dataset))))

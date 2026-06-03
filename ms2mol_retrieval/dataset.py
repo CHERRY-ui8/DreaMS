@@ -291,6 +291,8 @@ class MultiTaskRetrievalDataset(Dataset):
         split: str = 'train',
         cache_dir: str = None,
         molformer_cache_dir: str = None,
+        mw_mean: float = None,
+        mw_std: float = None,
     ):
         cache_dir = cache_dir or '/root/DreaMS/ms2mol_retrieval/shared_cache'
         molformer_cache_dir = molformer_cache_dir or '/root/DreaMS/ms2mol_retrieval/shared_cache'
@@ -362,11 +364,15 @@ class MultiTaskRetrievalDataset(Dataset):
         )
         print(f'[MultiTaskDataset]  Unique molecules: {len(unique_smiles)}')
 
-        # ── 分子量归一化参数（用训练集统计量） ──
-        # 注意：val/test 用训练集的 mean/std，避免 data leakage
-        self.mw_mean = float(self.mol_weights.mean())
-        self.mw_std = float(max(self.mol_weights.std(), 1.0))
-        print(f'[MultiTaskDataset]  mol_weight norm: mean={self.mw_mean:.2f}, std={self.mw_std:.2f}')
+        # ── 分子量归一化参数（val/test 复用训练集统计量，避免 data leakage） ──
+        if mw_mean is not None and mw_std is not None:
+            self.mw_mean = mw_mean
+            self.mw_std = mw_std
+            print(f'[MultiTaskDataset]  mol_weight norm: using train stats mean={self.mw_mean:.2f}, std={self.mw_std:.2f}')
+        else:
+            self.mw_mean = float(self.mol_weights.mean())
+            self.mw_std = float(max(self.mol_weights.std(), 1.0))
+            print(f'[MultiTaskDataset]  mol_weight norm: computed mean={self.mw_mean:.2f}, std={self.mw_std:.2f}')
 
         print(f'[MultiTaskDataset]  Total: {len(self)} samples')
 
