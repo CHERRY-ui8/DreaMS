@@ -18,12 +18,28 @@
 | 2 (projector + LoRA) | frozen projector, LoRA r=64 | Epoch 100: **99.22% exact**, Tanimoto 0.998 | LoRA 有效，收敛较慢 |
 | 2 (unfrozen proj + LoRA) | **解冻 Projector (lr×0.1)** + LoRA r=64 | **Epoch 100: 99.56% exact**, 100% valid, Tanimoto 0.998 | 对比 frozen: unfrozen 100ep 即更高（99.56% vs 99.22%） |
 
+##### 极小样本验证（训练流程正确性）
+
+在训练 5k 前，先用更小的样本量验证代码正确性：
+
+| 样本数 | Epochs | Exact Match | Valid SMILES | Tanimoto |
+|--------|--------|-------------|-------------|----------|
+| 100 | 2740 | 100% | 100% | 1.0 |
+| 1000 | 1820 | 100% | 100% | 1.0 |
+
+结论：代码在极小规模上能 100% 过拟合，训练流程无 bug。对应目录 `phase1_k128_d8_n100_scratch_nomaccs_0522_0537`、`phase1_k128_d8_n1000_scratch_nomaccs_0522_0624`。
+
 目标：训练集 Loss → 接近 0，SMILES 生成准确率接近 100%。
 
 ### 阶段一：引入子结构监督 + LoRA 微调 — 全量数据 ✅
 
+> 使用子结构监督的启发：
+> 本阶段引入子结构监督的灵感，源于近期 Nature Biotechnology (2026) 上关于代谢物全局映射的研究。该研究表明，MS/MS 谱图本质上是核心骨架碎片的反映，而非对完整分子结构的精确映射。例如，作者仅使用“水杨酸-噻唑啉（salicylic-thiazoline）”这一子结构（SMARTS）进行质谱检索，就成功召回了 Pyochelin、Yersiniabactin 等9种全结构不同但共享该骨架的分子，这充分证明了共享特定子结构的分子会在 MS/MS 中产生高度保守的碎片特征。
+> 这一化学规律为我们的生成模型提供了关键指引：如果直接让大模型从质谱端到端生成完整的 SMILES，相当于强迫模型在缺乏“骨架锚点”的情况下，同时盲猜核心结构与微小修饰，这极易导致“化学幻觉”。因此，我们顺应质谱碎裂的物理规律，引入了子结构监督机制。通过引导模型优先关注并预测质谱中信号最保守的“子结构”特征，再进一步生成完整分子，从而有效约束了模型的生成空间，大幅降低了幻觉的发生率。
+
+
 **配置**: `phase1_k16_d2_full_scratch_maccs01_0526_1324` → `phase2_k16_d2_full_resume_maccs01_lora64_uproj_0527_0347`
-- MLP Projector: d=8, K=16（而非 5k 实验的 K=128，因为全量数据更大、vocab 够用）
+- MLP Projector: d=8, K=16（而非 5k 实验的 K=128，全量数据 batch 大（4901 vs 157），K=128 的 72M 投影器训练太慢。且在当时 pooling 瓶颈下，K=16 和 K=128 效果一样，选小的是计算资源权衡）
 - MACCS: α=1.0, β=0.1
 - Phase 2: LoRA r=64 + unfrozen projector (lr×0.1), 10 epochs
 - 数据集: ~314K 质谱-分子对，分子级无泄漏划分
@@ -71,15 +87,43 @@
 3. MACCS 准确率在 Phase 2 中基本饱和（84.4%→84.5%），BCE loss 几乎不变——说明 BCE 梯度已耗尽，需要更强的主干或更多 epoch 才能进一步提升。
 4. 生成方面：Tanimoto 在 epoch 5 达到 0.122 后，epoch 10 反而下降到 0.111——生成质量没有随 loss 下降而改善，暗示解码策略（greedy/beam search）或模型容量有瓶颈。
 
-### 诊断与决策 2026-05-28
+### 诊断与决策
 
 #### K=128 投影器容量实验
 
-在 40k 分子子集上验证"增大 Projector 容量是否能突破 exact match = 0%"：
+在 40k 分子子集上系统地对比 K=16 vs K=128、有/无 MACCS 监督，验证"增大 Projector 容量是否能突破 exact match = 0%"：
 
-| 配置 | K tokens | Tanimoto | Exact Match | 结论 |
-|------|----------|----------|-------------|------|
-| MLP d=2, K=128, pooled 1024-d | 128 | **0.16** | **0.00%** | 72M 参数也无法恢复 pooling 丢掉的信息 |
+##### Phase 1（对齐期，30 epochs）
+
+| 实验 | K/d | MACCS | MACCS val acc | Gen valid | Gen Tanimoto | Gen Exact |
+|------|-----|-------|:------------:|:---------:|:------------:|:---------:|
+| `phase1_k16_d2_s40000_scratch_maccs01_0528_0227` | K=16, d=2 | α=0.1 | 83.4% | 10→28% | 0.16→0.21 | 0.00% |
+| `phase1_k128_d8_s40000_scratch_maccs0.1_0528_0815` | K=128, d=8 | α=0.1 | 82.0% | 66→89% | 0.16→0.17 | 0.00% |
+
+以上两个实验共享同一配置族：30 epochs、MACCS 辅助监督、每 5 epoch 做 gen eval。
+
+并行还有一个**纯过拟合实验**（无 MACCS、5000 epochs、无 gen eval），作为对照：
+- `phase1_k128_d8_n40000_scratch_nomaccs_0528_1502`：K=128, d=8, 无 MACCS 头，只优化 CE loss。22 epoch 时 val loss 已从 1.56 降至 0.64（best=0.64），仍在继续下降。无 gen eval 数据，无法直接比较生成质量，但说明 40k 数据量足够让模型记忆分布。
+
+关键观察：
+- **K=16 生成 valid rate 低（10~28%）**：K tokens 太少 → T5 接收的信息量不足 → 大量无效 SMILES。但 Tanimoto 反而略高（0.21 vs 0.17），说明 valid 的生成在化学空间上更接近参考分子。
+- **K=128 生成 valid rate 高（66→89%）**：更多 token 让 T5 生成更容易，valid rate 大幅提升。但 Tanimoto 饱和在 0.17 附近，不再随训练提升。
+- **所有实验 exact match = 0.00%**：无论 K=16 还是 K=128，无论有没有 MACCS 监督，exact match 始终为零。Pooling 丢信息的瓶颈是结构性的，增大容量和子结构监督都无法绕过。
+
+##### Phase 2（LoRA r=64 + unfrozen projector，50 epochs）
+
+从 phase1 K=128 MACCS checkpoints resume：
+
+| 实验 | MACCS val | Gen valid | Gen Tanimoto | Gen Exact |
+|:----|:---------:|:---------:|:------------:|:---------:|
+| `phase2_k128_d8_s40000_maccs0.1_lora64_uproj_0528_1024` (10→40 ep) | 82.5% | 89→98% | 0.16→0.17 | 0.00% |
+
+关键观察：
+- Valid rate 继续提升（最高 98%），Tanimoto 仍在 0.17 附近饱和
+- MACCS val acc 在 Phase 2 中基本没变（82.5%），说明 Phase 1 已经榨干了 MLP Projector 的 MACCS 能力
+- **Exact match 仍然为 0%**，Phase 2 LoRA 适配也救不了 pooling 丢掉的细节
+
+**结论**：40k 子集实验证实，瓶颈不在 Projector 容量（K=128 有 72M 参数）也不在 LoRA 适配，而在 pooling 这一步彻底丢失了峰位级信息。这直接触发了架构向全序列直通 T5 的转型。
 
 **根因确认**：瓶颈不在 Projector 容量，而在 `DreaMS → (60,1024) → [CLS]pool → (1024,)` 这一步。60 个峰位 × 1024-d = 61,440 个数压缩到 1024 是不可逆的。即使 K=128（最后一层 1024→65536），Projector 也只能记住训练集分布，无法在 unseen 分子上泛化。
 
@@ -131,8 +175,17 @@
 
 ### 阶段二：架构升级 (Unlock MS Sequence + Q-Former) —— 重大修改！
 
-#### Step 1 (已完成): LinearPerPeak — 全序列直通 T5
-用 `Linear(1024→d_model)` 独立投影每个峰位，60 个 token 直接喂给 T5 encoder：
+#### Step 1 (数据构造完成，实验待跑): LinearPerPeak — 全序列直通 T5
+
+数据构造已完成（HDF5 预存 `full_embedding` (N, 60, 1024)），模型代码也已实现。目前先用 40k 子集进行实验（而非全量 314k），原因有两个：
+
+1. **输入量暴增**：之前 pooling 后每样本只有 1 个（或 K 个）token 喂给 T5，现在每样本 60 个峰位 token，T5 encoder 的 self-attention 计算量从 O(1) 变成 O(60²)，每个 batch 的处理时间大幅增加。40k 子集可以在小时级完成单次实验。
+2. **当前效果本身不好**：之前 40k 和 314k 上的 exact match 均为 0%，全量数据并无优势。用 40k 验证改进已足够，迭代成本更低。
+
+> 当前状态：实验正在进行中。
+
+实现细节（已就绪）：
+
 ```
 DreaMS → (60,1024) → Linear(1024→d_model) 每峰 → (60,d_model) → T5
 ```

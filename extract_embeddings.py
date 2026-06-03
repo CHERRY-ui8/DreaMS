@@ -46,7 +46,7 @@ from torch.utils.data import DataLoader, TensorDataset
 HDF5_IN = Path('/root/datasets/pairs_ready.hdf5')
 HDF5_OUT = Path('/root/datasets/pairs_with_embs.hdf5')
 CKPT = 'dreams/models/pretrained/ssl_model.ckpt'
-BATCH_SIZE = 256
+BATCH_SIZE = 64
 
 # ─── Output mode ─────────────────────────────────
 # 'pooled' — (B, 1024)  [CLS] token only  (original behavior)
@@ -143,6 +143,11 @@ with h5py.File(HDF5_OUT, 'w') as f:
     f.create_dataset('collision_energy', data=ce, dtype='int16')
     f.create_dataset('charge', data=charge, dtype='int8')
     f.create_dataset('precursor_mz', data=pmz, dtype='float32')
+
+    # Copy precomputed MACCS from pairs_ready.hdf5
+    with h5py.File(HDF5_IN, 'r') as fin:
+        if 'maccs' in fin:
+            f.create_dataset('maccs', data=fin['maccs'][:], dtype='int8')
 
     # Copy attrs
     with h5py.File(HDF5_IN, 'r') as fin:

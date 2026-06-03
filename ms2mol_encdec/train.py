@@ -75,7 +75,7 @@ def parse_args():
                         help='Number of attention heads in Q-Former (default: 8)')
     parser.add_argument('--warmup_steps', type=int, default=200)
     parser.add_argument('--grad_clip', type=float, default=1.0)
-    parser.add_argument('--output_dir', default='/root/DreaMS/ms2mol_encdec/outputs')
+    parser.add_argument('--output_dir', default='/root/DreaMS/outputs')
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint (for Phase 2)')
@@ -116,6 +116,9 @@ def parse_args():
                         help='Random seed for N-sample subset selection')
     parser.add_argument('--eval_every', type=int, default=5,
                         help='Generation evaluation every N epochs (default: 5)')
+    parser.add_argument('--shuffle_ms', action='store_true',
+                        help='Shuffle MS embeddings across batch (mismatch spectra vs labels). '
+                             'Diagnostic: if loss/generation don\'t change, decoder ignores encoder input.')
     return parser.parse_args()
 
 
@@ -263,10 +266,23 @@ def main():
 
     # linear_per_peak requires MSSpectrumSmilesFullSeqDataset (full 60x1024 sequence)
     if args.projector_type == 'linear_per_peak':
-        if is_nmode or is_subset_mode:
-            print('  [linear_per_peak] Subset/N-mode uses full dataset; set --n/subset=0 for full control')
-        train_dataset = MSSpectrumSmilesFullSeqDataset(split='train')
-        val_dataset = MSSpectrumSmilesFullSeqDataset(split='val')
+        if is_subset_mode:
+            print(f'  Using sampled subset: {args.subset} unique molecules (full_embedding, lazy)')
+            train_dataset = SampledSubsetDataset(
+                split='train', n=args.subset, seed=args.seed,
+                embedding_key='full_embedding',
+            )
+            val_dataset = SampledSubsetDataset(
+                split='val', n=max(2000, args.subset // 20), seed=args.seed,
+                embedding_key='full_embedding',
+            )
+        elif is_nmode:
+            print('  [linear_per_peak] N-mode uses full dataset; set --n=0 for subset control')
+            train_dataset = MSSpectrumSmilesFullSeqDataset(split='train')
+            val_dataset = MSSpectrumSmilesFullSeqDataset(split='val')
+        else:
+            train_dataset = MSSpectrumSmilesFullSeqDataset(split='train')
+            val_dataset = MSSpectrumSmilesFullSeqDataset(split='val')
     elif is_subset_mode:
         train_dataset = SampledSubsetDataset(split='train', n=args.subset, seed=args.seed)
         val_dataset = SampledSubsetDataset(split='val', n=max(2000, args.subset // 20), seed=args.seed)
