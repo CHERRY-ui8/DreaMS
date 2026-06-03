@@ -4,6 +4,7 @@ __pycache__/
 
 # Data
 data/
+shared_cache/
 
 # Training outputs
 outputs/
