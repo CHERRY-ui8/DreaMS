@@ -419,3 +419,13 @@ class MSMolCLIPSharedTrunk(MSMolCLIP):
             'maccs_logits': self.proj_maccs(shared),
             'mol_weight': self.proj_mol_weight(shared),
         }
+
+    def encode_ms(self, ms_emb: torch.Tensor) -> torch.Tensor:
+        """Override: use shared trunk + cross_head instead of raw ms_projector.
+
+        This is called by evaluate_retrieval() and compute_loss() to encode
+        MS embeddings for FAISS search. The inherited encode_ms uses the
+        untrained ms_projector, which would give garbage retrieval metrics.
+        """
+        shared = self.shared_trunk(ms_emb)
+        return F.normalize(self.cross_head(shared), dim=-1)
